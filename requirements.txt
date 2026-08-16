@@ -1,0 +1,6 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+httpx>=0.27
+pydantic>=2.6
+# 可选:从 Hugging Face 加载真实 SWE-bench Pro 数据集
+# datasets>=2.19
