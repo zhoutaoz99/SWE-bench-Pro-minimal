@@ -122,7 +122,11 @@ def build_report(run_id: str, records: list[dict], suite: dict,
     inst_meta = {i["instance_id"]: i for i in suite["instances"]}
     first = _first_run(records)
     maj = _majority(records)
-    ids = [i["instance_id"] for i in suite["instances"]]
+    # 明细行与执行顺序一致:简单 → 中等 → 困难(同带内保持套件顺序)
+    band_order = {"easy": 0, "medium": 1, "hard": 2}
+    ids = [i["instance_id"] for i in
+           sorted(suite["instances"],
+                  key=lambda x: band_order.get(x.get("difficulty"), 3))]
 
     def status_of(iid: str, role: str, source: dict | None = None) -> Optional[bool]:
         if source is not None:
@@ -172,6 +176,10 @@ def build_report(run_id: str, records: list[dict], suite: dict,
             "wall_b": _avg_field(records, iid, "candidate", "wall_s") if ab_mode else None,
             "runs_a": _run_summary(records, iid, "baseline"),
             "runs_b": _run_summary(records, iid, "candidate") if ab_mode else None,
+            # Agent scaffold:各端平均使用的轮数(单轮模式为 0)
+            "turns_a": _avg_field(records, iid, "baseline", "turns_used"),
+            "turns_b": (_avg_field(records, iid, "candidate", "turns_used")
+                        if ab_mode else None),
         }
         if ab_mode:
             if ra is None or rb is None:

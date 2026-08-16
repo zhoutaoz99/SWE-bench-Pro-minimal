@@ -9,10 +9,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from .schemas import RunRequest, SuiteManifest
+from .schemas import ProviderConfig, RunRequest, SuiteManifest
 
 RUNS_DIR = Path(__file__).parent.parent / "runs"
 SUITES_DIR = RUNS_DIR / "suites"
+PROFILES_FILE = "provider_profiles.json"
 
 
 def _now() -> str:
@@ -28,6 +29,58 @@ class RunStore:
         self.root = root
         self.suites_dir = root / "suites"
         self.suites_dir.mkdir(parents=True, exist_ok=True)
+
+    # ---------- Provider 配置档案 ----------
+    def _load_profiles(self) -> dict:
+        """已保存的 Provider 配置档案(含 api_key,仅存本地 runs/ 目录,已 gitignore)。"""
+        path = self.root / PROFILES_FILE
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except (ValueError, OSError):
+            return {}
+
+    def _write_profiles(self, profiles: dict) -> None:
+        path = self.root / PROFILES_FILE
+        path.write_text(
+            json.dumps(profiles, ensure_ascii=False, indent=2),
+            encoding="utf-8")
+
+    def list_profiles(self) -> list[dict]:
+        out = []
+        for pid, p in self._load_profiles().items():
+            out.append({
+                "id": pid, "name": p.get("name", ""),
+                "model": (p.get("config") or {}).get("model", ""),
+                "updated_at": p.get("updated_at", ""),
+                "config": p.get("config") or {},
+            })
+        out.sort(key=lambda x: x["updated_at"], reverse=True)
+        return out
+
+    def save_profile(self, name: str, config: ProviderConfig) -> dict:
+        """按名称保存/覆盖;同名覆盖保留原 id。"""
+        profiles = self._load_profiles()
+        pid = next((k for k, p in profiles.items() if p.get("name") == name),
+                   os.urandom(4).hex())
+        profiles[pid] = {
+            "name": name,
+            "updated_at": _now(),
+            "config": json.loads(config.model_dump_json()),
+        }
+        self._write_profiles(profiles)
+        return {"id": pid, "name": name}
+
+    def delete_profile(self, pid: str) -> bool:
+        profiles = self._load_profiles()
+        if pid not in profiles:
+            return False
+        del profiles[pid]
+        self._write_profiles(profiles)
+        return True
+
 
     # ---------- 套件 ----------
     def save_suite(self, manifest: SuiteManifest) -> None:
@@ -106,6 +159,8 @@ class RunStore:
                 "model": p.model,
                 "temperature": p.temperature, "top_p": p.top_p,
                 "max_tokens": p.max_tokens, "reasoning_effort": p.reasoning_effort,
+                "provider_routing": (p.provider.to_request_dict()
+                                     if p.provider and not p.provider.is_empty() else None),
             }
 
         baseline_block = provider_block(request.provider_a) if request.provider_a else None
@@ -118,7 +173,8 @@ class RunStore:
             "suite_version": suite.suite_version,
             "repeat_disagreements": request.repeat_disagreements,
             "turn_limit": request.turn_limit,
-            "scaffold": "single-turn-patch-scaffold-v1",
+            "scaffold": ("agent-scaffold-v1" if request.scaffold == "agent"
+                         else "single-turn-patch-scaffold-v1"),
             "baseline_run_id": request.baseline_run_id,
             "providers": {
                 **({"baseline": baseline_block} if baseline_block else {}),
@@ -278,6 +334,8 @@ class RunStore:
                 "suite_level": suite.get("level"),
                 "suite_version": suite.get("suite_version"),
                 "n_instances": len(suite.get("instances", [])),
+                "scaffold": req.get("scaffold") or "single-turn",
+                "turn_limit": req.get("turn_limit", 50),
                 "resolved": (report.get("summary") or {}).get("resolved_a"),
             })
         return out
@@ -298,7 +356,8 @@ def records_to_csv(records: list[dict]) -> str:
                "status", "resolved", "f2p_passed", "f2p_total",
                "p2p_passed", "p2p_total", "prompt_tokens", "completion_tokens",
                "cached_tokens", "ttft_s", "wall_s", "decode_tps",
-               "finish_reason", "cost_usd", "eval_method"]
+               "finish_reason", "truncated", "turns_used", "tool_calls",
+               "tool_errors", "cost_usd", "eval_method"]
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=columns, extrasaction="ignore")
     writer.writeheader()

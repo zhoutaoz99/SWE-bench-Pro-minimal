@@ -29,8 +29,17 @@ python run_server.py          # 默认 http://127.0.0.1:8765,可指定端口:pyt
 
 ## 评测方式
 
-真实调用所填 Provider 的 OpenAI 兼容 `/chat/completions`(流式,记录 TTFT / decode tok/s /
-usage;429/5xx 自动重试);Resolved 为补丁结构启发式判定。建议先用 Smoke-6 验证连通性。
+默认采用**多轮 Agent scaffold**(对齐官方 SWE-Agent 形态的最小本地实现):模型通过
+`bash` / `view_file` / `edit_file` / `submit` 四个工具在每任务专属工作区内迭代解题
+(工作区以 TASK.md 种子并建立 git 基线),`submit` 或轮次预算(默认 200,对齐官方)耗尽后,
+以工作区文件变更的 `git diff` 作为补丁交给评测器;流式记录每轮 TTFT / decode tok/s / usage,
+429/5xx 自动重试。评测设置中可切回旧版**单轮补丁生成**(两端必须同 scaffold,复用基线时强校验)。
+
+Resolved 为补丁结构启发式判定。建议先用 Smoke-6 验证连通性。
+
+> ⚠️ 隔离性:官方评测在 Docker 容器内执行命令;本框架的 bash 工具在**宿主机**工作区
+> 目录内直接执行(仅 cwd 限定 + 超时 + 输出截断),只应在可信评测环境下使用。
+> 设 `SBP_AGENT_BASH=0` 可禁用 bash 工具,`SBP_AGENT_BASH_TIMEOUT` 调整超时。
 
 ## 基线与候选端独立运行 / 基线复用
 
@@ -87,7 +96,8 @@ usage;429/5xx 自动重试);Resolved 为补丁结构启发式判定。建议先�
 │   ├── dataset.py           # 种子池加载 + HF 真实数据集加载(可选拓展)
 │   ├── difficulty.py        # D_struct / D_emp / InfoScore / 难度分带
 │   ├── sampler.py           # 分层抽样器(Smoke-6 / Core-12 / Confirm-24)
-│   ├── provider.py          # OpenAI 兼容客户端(流式 TTFT)
+│   ├── provider.py          # OpenAI 兼容客户端(流式 TTFT;agent_step 工具调用)
+│   ├── env.py               # Agent 工作区(bash/查看/编辑/submit 工具 + git 补丁提取)
 │   ├── evaluator.py         # fail-to-pass / pass-to-pass 判定(补丁结构启发式)
 │   ├── runner.py            # A/B Runner:S1 → S2 分歧复测 → 分析;支持基线复用(只实跑候选端)
 │   ├── analyzer.py          # 指标 / 成对统计 / 决策 / Markdown 报告
@@ -100,8 +110,9 @@ usage;429/5xx 自动重试);Resolved 为补丁结构启发式判定。建议先�
 
 ## 已知限制(与正式评测的差距)
 
-1. **Scaffold**:当前为单轮补丁生成(固定 prompt = problem_statement + requirements + interface),
-   未实现 SWE-Agent 50-turn 工具循环;与官方分数不可比,但两端对比公平性成立。
+1. **Scaffold**:默认为多轮 Agent 工具循环(OpenAI function-calling,轮次预算对齐官方 200),
+   但工作区为 TASK.md 种子的空仓库,**不含真实代码库**;官方在 Docker 内挂载真实 repo。
+   与官方分数不可比,但两端对比公平性成立。
 2. **评测判定**:Resolved 为补丁结构启发式判定。正式结论需接官方 Docker evaluator。
 3. **实例数据**:36 题为演示种子(元数据按公开集仓库结构构造),正式使用应
    `pip install datasets` 后从 `ScaleAI/SWE-bench_Pro` 固定 revision 加载并跑质量门禁。

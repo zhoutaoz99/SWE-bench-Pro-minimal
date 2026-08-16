@@ -50,11 +50,11 @@ function gotoTab(name, runId = null) {
 }
 
 /* ---------------- 新建评测 ---------------- */
-const SEGMENTS = { "suite-level": "smoke6" };
+const SEGMENTS = { "suite-level": "smoke6", "scaffold-mode": "agent" };
 Object.keys(SEGMENTS).forEach((id) => {
   $(`#${id}`).addEventListener("click", (e) => {
     const btn = e.target.closest("button");
-    if (!btn) return;
+    if (!btn || btn.disabled) return;
     $$(`#${id} button`).forEach((b) => b.classList.remove("active"));
     btn.classList.add("active");
     SEGMENTS[id] = btn.dataset.v;
@@ -82,9 +82,12 @@ function applyBaselineMode() {
   const reuse = BASELINE_MODE === "reuse";
   $("#reuse-row").style.display = reuse ? "" : "none";
   $("#form-a").classList.toggle("disabled", reuse);
-  // 复用基线时套件与评测模式由基线运行决定,锁定套件层级 / seed / 模式
+  // 复用基线时套件与评测模式由基线运行决定,锁定套件层级 / seed / scaffold / 轮次
   $("#setting-suite").classList.toggle("disabled", reuse);
   $("#suite-seed").disabled = reuse;
+  $("#setting-scaffold").classList.toggle("disabled", reuse);
+  $$("#scaffold-mode button").forEach((b) => { b.disabled = reuse; });
+  $("#turn-limit").disabled = reuse;
   // 复用基线必须有候选端,锁定为启用
   $("#enable-b").checked = true;
   $("#enable-b").disabled = reuse;
@@ -92,6 +95,16 @@ function applyBaselineMode() {
   $("#enable-b-wrap").style.pointerEvents = reuse ? "none" : "";
   $("#form-b").classList.remove("disabled");
   if (reuse) loadBaselines();
+}
+
+function syncScaffoldFromBaseline(b) {
+  // scaffold 必须与基线一致(后端强校验);轮次对齐以保证公平
+  const sc = b.scaffold || "single-turn";
+  $$("#scaffold-mode button").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.v === sc);
+  });
+  SEGMENTS["scaffold-mode"] = sc;
+  if (b.turn_limit) $("#turn-limit").value = b.turn_limit;
 }
 
 async function loadBaselines() {
@@ -105,7 +118,7 @@ async function loadBaselines() {
       return;
     }
     sel.innerHTML = list.map((b) =>
-      `<option value="${b.run_id}">${b.run_id} · ${esc(b.model || "-")} · ${esc(b.suite_level)} · Resolved ${b.resolved ?? "-"}/${b.n_instances}</option>`
+      `<option value="${b.run_id}">${b.run_id} · ${esc(b.model || "-")} · ${esc(b.suite_level)} · ${b.scaffold === "agent" ? "Agent" : "单轮"} · Resolved ${b.resolved ?? "-"}/${b.n_instances}</option>`
     ).join("");
     $("#reuse-hint").textContent = "基线记录(含成本/耗时)将原样导入本次运行;S2 分歧复测仅补跑候选端。";
     sel.dispatchEvent(new Event("change"));
@@ -117,8 +130,9 @@ async function loadBaselines() {
 $("#reuse-baseline").addEventListener("change", (e) => {
   const b = baselinesCache.find((x) => x.run_id === e.target.value);
   if (!b) return;
+  syncScaffoldFromBaseline(b);
   $("#reuse-hint").textContent =
-    `将沿用套件 ${b.suite_id}(${b.suite_version},${b.n_instances} 题);` +
+    `将沿用套件 ${b.suite_id}(${b.suite_version},${b.n_instances} 题,${b.scaffold || "single-turn"} 模式);` +
     "S2 分歧复测仅补跑候选端,基线保持该运行的结果。";
 });
 
@@ -126,21 +140,156 @@ function readProvider(role) {
   const grid = $(`[data-provider="${role}"]`);
   const get = (n) => grid.querySelector(`[name="${n}"]`).value.trim();
   const num = (n, d) => { const v = parseFloat(get(n)); return isNaN(v) ? d : v; };
+  // OpenRouter Provider 路由:列表字段逗号分隔,枚举/布尔留空则不发送
+  const splitList = (v) => v.split(",").map((s) => s.trim()).filter(Boolean);
+  const routing = {};
+  ["only", "ignore", "order"].forEach((k) => {
+    const list = splitList(get(`pr_${k}`));
+    if (list.length) routing[k] = list;
+  });
+  if (get("pr_allow_fallbacks")) routing.allow_fallbacks = get("pr_allow_fallbacks") === "true";
+  if (get("pr_sort")) routing.sort = get("pr_sort");
+  if (get("pr_require_parameters")) routing.require_parameters = get("pr_require_parameters") === "true";
+  if (get("pr_data_policy")) routing.data_policy = get("pr_data_policy");
   return {
     name: get("name") || (role === "a" ? "Baseline" : "Candidate"),
     base_url: get("base_url"),
     model: get("model"),
     api_key: get("api_key"),
     role: role === "a" ? "baseline" : "candidate",
-    temperature: num("temperature", 0.0),
-    top_p: num("top_p", 1.0),
-    max_tokens: Math.round(num("max_tokens", 8192)),
+    temperature: num("temperature", 1.0),
+    top_p: num("top_p", 0.95),
+    max_tokens: Math.round(num("max_tokens", 32768)),
     reasoning_effort: get("reasoning_effort") || null,
     price_input_per_m: num("price_input_per_m", 0),
     price_cached_per_m: num("price_cached_per_m", 0),
     price_output_per_m: num("price_output_per_m", 0),
+    provider: Object.keys(routing).length ? routing : null,
   };
 }
+
+/* ----- Provider 配置档案:保存 / 载入 / 删除 ----- */
+let profilesCache = [];
+
+async function refreshProfiles() {
+  try {
+    profilesCache = await api("/api/provider-profiles");
+  } catch (_) { profilesCache = []; }
+  ["a", "b"].forEach((role) => {
+    const sel = $(`#profile-select-${role}`);
+    const cur = sel.value;
+    sel.innerHTML = `<option value="">📂 已保存配置(${profilesCache.length})</option>` +
+      profilesCache.map((p) =>
+        `<option value="${esc(p.id)}">${esc(p.name)} · ${esc(p.model || "-")}</option>`).join("");
+    sel.value = profilesCache.some((p) => p.id === cur) ? cur : "";
+  });
+}
+
+function fillProviderForm(role, conf) {
+  const grid = $(`[data-provider="${role}"]`);
+  const set = (n, v) => { grid.querySelector(`[name="${n}"]`).value = v ?? ""; };
+  set("name", conf.name); set("base_url", conf.base_url);
+  set("model", conf.model); set("api_key", conf.api_key || "");
+  set("temperature", conf.temperature ?? 1.0); set("top_p", conf.top_p ?? 0.95);
+  set("max_tokens", conf.max_tokens ?? 32768); set("reasoning_effort", conf.reasoning_effort || "max");
+  set("price_input_per_m", conf.price_input_per_m || "");
+  set("price_cached_per_m", conf.price_cached_per_m || "");
+  set("price_output_per_m", conf.price_output_per_m || "");
+  const pr = conf.provider || {};
+  set("pr_only", (pr.only || []).join(","));
+  set("pr_ignore", (pr.ignore || []).join(","));
+  set("pr_order", (pr.order || []).join(","));
+  set("pr_allow_fallbacks", pr.allow_fallbacks === false ? "false" : "");
+  set("pr_sort", pr.sort || "");
+  set("pr_require_parameters", pr.require_parameters === true ? "true" : "");
+  set("pr_data_policy", pr.data_policy || "");
+}
+
+["a", "b"].forEach((role) => {
+  $(`#profile-select-${role}`).addEventListener("change", (e) => {
+    const p = profilesCache.find((x) => x.id === e.target.value);
+    if (!p) return;
+    fillProviderForm(role, p.config || {});
+    toast(`已载入配置「${p.name}」(可继续修改,保存将覆盖)`);
+  });
+
+  $(`#btn-save-${role}`).addEventListener("click", async (btnEv) => {
+    const conf = readProvider(role);
+    if (!conf.base_url || !conf.model) {
+      toast("请先填写 Base URL 与 Model ID 后再保存");
+      return;
+    }
+    const name = conf.name || conf.model;
+    const btn = btnEv.currentTarget;
+    btn.disabled = true;
+    try {
+      const res = await api("/api/provider-profiles", "POST", { name, config: conf });
+      toast(`已保存 Provider 配置「${name}」`);
+      await refreshProfiles();
+      $(`#profile-select-${role}`).value = res.id;
+    } catch (err) {
+      const hint = /not found/i.test(err.message)
+        ? "(接口不存在:后端服务是旧进程,请重启后加载新功能)" : "";
+      toast(`保存失败:${err.message}${hint}`, 5200);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  $(`#btn-del-profile-${role}`).addEventListener("click", async () => {
+    const sel = $(`#profile-select-${role}`);
+    const p = profilesCache.find((x) => x.id === sel.value);
+    if (!p) { toast("请先在下拉框选择要删除的配置"); return; }
+    if (!confirm(`删除 Provider 配置「${p.name}」?`)) return;
+    try {
+      await api(`/api/provider-profiles/${encodeURIComponent(p.id)}`, "DELETE");
+      toast(`已删除「${p.name}」`);
+      await refreshProfiles();
+    } catch (err) { toast(`删除失败:${err.message}`); }
+  });
+});
+
+/* ----- Provider 连通性测试 ----- */
+async function testProviderConn(role) {
+  const btn = $(`#btn-test-${role}`);
+  const status = $(`#test-status-${role}`);
+  if (!btn || btn.disabled) return;
+  const conf = readProvider(role);
+  if (!conf.base_url || !conf.model) {
+    toast("请先填写 Base URL 与 Model ID 后再测试连通");
+    return;
+  }
+  btn.disabled = true;
+  status.className = "test-status testing";
+  status.textContent = "测试中…";
+  status.title = "";
+  try {
+    const res = await api("/api/test-provider", "POST", { provider: conf });
+    if (res.ok) {
+      const ttft = res.ttft_s != null ? ` · TTFT ${Math.round(res.ttft_s * 1000)}ms` : "";
+      const only = res.provider_routing && res.provider_routing.only;
+      const routing = only ? ` · 仅 ${only.join("/")}` : "";
+      // 思考型模型:16 token 预算内只够输出思维链,回答未产出属正常,但评测需更大预算
+      const reasoning = res.reasoning_chars > 0
+        ? ` · 思考型(本次 ${res.reasoning_chars} 字符思维链)` : "";
+      status.className = "test-status ok";
+      status.textContent = `✓ 连通 · ${res.wall_s}s${ttft}${routing}${reasoning}`;
+    } else {
+      const first = ((res.errors && res.errors[0]) || "请求失败");
+      status.className = "test-status fail";
+      status.textContent = `✗ ${first.slice(0, 140)}`;
+      status.title = (res.errors || []).join(" | ");
+    }
+  } catch (err) {
+    status.className = "test-status fail";
+    status.textContent = `✗ ${err.message.slice(0, 140)}`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+$("#btn-test-a").addEventListener("click", () => testProviderConn("a"));
+$("#btn-test-b").addEventListener("click", () => testProviderConn("b"));
 
 $("#btn-start").addEventListener("click", async () => {
   const reuse = BASELINE_MODE === "reuse";
@@ -155,6 +304,8 @@ $("#btn-start").addEventListener("click", async () => {
     suite_level: SEGMENTS["suite-level"],
     suite_seed: parseInt($("#suite-seed").value) || 20260816,
     repeat_disagreements: parseInt($("#repeat-dis").value) || 0,
+    scaffold: SEGMENTS["scaffold-mode"],
+    turn_limit: parseInt($("#turn-limit").value) || 200,
   };
   if (!reuse && !$("#enable-b").checked && !SEGMENTS_HINTED_SINGLE) {
     SEGMENTS_HINTED_SINGLE = true;
@@ -181,6 +332,8 @@ let SEGMENTS_HINTED_SINGLE = false;
 /* ---------------- 运行监控 ---------------- */
 let selectedRunId = null;
 let monitorTimer = null;
+let liveEntries = [];          // /live 元信息(长度/状态,不含正文)
+let liveSel = null;            // 当前查看的实时条目 {iid, role, runIndex, rOffset, cOffset}
 
 const STATUS_BADGE = {
   queued: ["pending", "排队中"], running: ["running", "运行中"],
@@ -188,6 +341,9 @@ const STATUS_BADGE = {
   completed: ["done", "已完成"], failed: ["fail", "失败"],
   cancelled: ["cancel", "已取消"],
 };
+
+// 终态运行才可删除(进行中的需先取消,与后端 DELETE 校验一致)
+const TERMINAL_STATUS = ["completed", "failed", "cancelled"];
 
 async function refreshRuns() {
   const runs = await api("/api/runs");
@@ -206,13 +362,47 @@ async function refreshRuns() {
       <td class="mono">${esc(r.model_b || (r.baseline_run_id ? "—" : "-"))}</td>
       <td style="min-width:110px"><div class="progress" style="height:6px"><div class="progress-bar" style="width:${pct}%"></div></div><span style="font-size:11px;color:var(--muted)">${r.progress.done}/${r.progress.total}</span></td>
       <td style="font-size:12px;color:var(--muted)">${esc((r.created_at || "").replace("T", " ").slice(0, 19))}</td>
-      <td>${r.report_ready ? `<button class="btn sm primary" data-view="${r.run_id}">报告</button>` : ""}</td>
+      <td>${r.report_ready ? `<button class="btn sm primary" data-view="${r.run_id}">报告</button>` : ""}
+          ${TERMINAL_STATUS.includes(r.status)
+            ? `<button class="btn sm danger" data-del="${r.run_id}" title="删除该运行的全部产物">删除</button>` : ""}</td>
     </tr>`;
   }).join("");
   $("#runs-empty").style.display = runs.length ? "none" : "block";
 }
 
-$("#runs-table").addEventListener("click", (e) => {
+$("#runs-table").addEventListener("click", async (e) => {
+  const del = e.target.closest("[data-del]");
+  if (del) {
+    const runId = del.dataset.del;
+    let runs = [];
+    try { runs = await api("/api/runs"); } catch (_) { /* 提示信息降级为不带复用说明 */ }
+    const reusedBy = runs.filter((o) => o.baseline_run_id === runId).map((o) => o.run_id);
+    const msg = [`删除运行 ${runId}?`, "其全部产物(清单 / 记录 / 报告 / 轨迹)将被永久删除,不可恢复。"];
+    if (reusedBy.length) msg.push(`注意:运行 ${reusedBy.join("、")} 复用过它作基线;旧报告自包含不受影响,但不能再以它为复用源新建评测。`);
+    if (!confirm(msg.join("\n"))) return;
+    try {
+      await api(`/api/runs/${encodeURIComponent(runId)}`, "DELETE");
+      toast(`已删除 ${runId}`);
+      if (selectedRunId === runId) {
+        selectedRunId = null;
+        clearInterval(monitorTimer);
+        closeLivePanel();
+        $("#monitor-detail").style.display = "none";
+      }
+      await refreshRuns();
+      loadReportOptions();
+      { // 删除的运行可能正在可复用基线列表中;保留用户当前选择的基线
+        const sel = $("#reuse-baseline");
+        const prev = sel.value;
+        await loadBaselines();
+        if (prev && sel.querySelector(`option[value="${CSS.escape(prev)}"]`)) {
+          sel.value = prev;
+          sel.dispatchEvent(new Event("change"));
+        }
+      }
+    } catch (err) { toast(`删除失败:${err.message}`, 4000); }
+    return;
+  }
   const view = e.target.closest("[data-view]");
   if (view) { gotoTab("report", view.dataset.view); return; }
   const tr = e.target.closest("tr[data-run]");
@@ -222,6 +412,7 @@ $("#btn-refresh-runs").addEventListener("click", refreshRuns);
 
 async function selectRun(runId) {
   selectedRunId = runId;
+  closeLivePanel();
   $("#monitor-detail").style.display = "block";
   $("#monitor-title").textContent = `运行详情 · ${runId}`;
   clearInterval(monitorTimer);
@@ -231,9 +422,14 @@ async function selectRun(runId) {
 
 async function pollMonitor() {
   if (!selectedRunId) return;
-  let st;
-  try { st = await api(`/api/runs/${selectedRunId}/state`); }
-  catch (_) { clearInterval(monitorTimer); return; }
+  let st, liveInfo;
+  try {
+    [st, liveInfo] = await Promise.all([
+      api(`/api/runs/${selectedRunId}/state`),
+      api(`/api/runs/${selectedRunId}/live`).catch(() => ({ entries: [] })),
+    ]);
+  } catch (_) { clearInterval(monitorTimer); return; }
+  liveEntries = liveInfo.entries || [];
 
   const [cls, label] = STATUS_BADGE[st.status] || ["pending", st.status];
   const { done, total } = st.progress;
@@ -247,7 +443,11 @@ async function pollMonitor() {
   $("#btn-view-report").style.display = st.report_ready ? "" : "none";
 
   const suite = st.suite || { instances: [] };
-  $("#inst-grid").innerHTML = suite.instances.map((inst) => {
+  // 与后端执行顺序一致:简单 → 中等 → 困难(同带内保持套件顺序)
+  const bandOrder = { easy: 0, medium: 1, hard: 2 };
+  const orderedInsts = [...suite.instances]
+    .sort((a, b) => (bandOrder[a.difficulty] ?? 3) - (bandOrder[b.difficulty] ?? 3));
+  $("#inst-grid").innerHTML = orderedInsts.map((inst) => {
     const stat = (st.instance_status || {})[inst.instance_id] || {};
     const chip = (v) => v ? `<span class="res-tag res-${v[0].toUpperCase()}">${{ p: "PASS", f: "FAIL", e: "ERR", r: "…" }[v[0].toLowerCase()] || v}</span>` : `<span class="res-tag" style="background:#f1f5f9;color:#94a3b8">—</span>`;
     const runsOf = (role) => Object.keys(stat)
@@ -257,8 +457,13 @@ async function pollMonitor() {
       .map((c, i) => `<span class="spark">${c}</span>`).join("");
     const cur = (st.progress.current || {});
     const running = cur.instance_id === inst.instance_id;
-    return `<div class="inst-cell" ${running ? 'style="border-color:var(--primary);box-shadow:0 0 0 2px rgba(37,99,235,.15)"' : ""}>
-      <div class="iid">${esc(inst.instance_id)}</div>
+    const streaming = liveEntries.some((e) =>
+      e.instance_id === inst.instance_id && e.status === "streaming");
+    const selected = liveSel && liveSel.iid === inst.instance_id;
+    return `<div class="inst-cell clickable" data-iid="${esc(inst.instance_id)}"
+      ${running ? 'style="border-color:var(--primary);box-shadow:0 0 0 2px rgba(37,99,235,.15)"' : ""}
+      ${selected ? 'data-selected="1"' : ""}>
+      <div class="iid">${streaming ? '<span style="color:#ef4444" title="流式输出中">●</span> ' : ""}${esc(inst.instance_id)}</div>
       <div class="meta">${esc(inst.repo)} · ${esc(inst.language_family)} · ${esc(inst.task_type)} · ${esc(inst.difficulty)}</div>
       <div class="res">
         <span class="res-tag res-a">A</span>${chip(stat.baseline)}${runsOf("baseline")}
@@ -268,12 +473,119 @@ async function pollMonitor() {
     </div>`;
   }).join("");
 
+  if (liveSel) updateLivePanel();
+
   if (["completed", "failed", "cancelled"].includes(st.status)) {
     clearInterval(monitorTimer);
     refreshRuns();
     if (st.status === "completed") loadReportOptions();
     if (st.status === "failed") toast(`运行失败:${(st.error || "").split("\n").slice(-2)[0]}`, 5000);
   }
+}
+
+/* ---------------- 实时输出面板 ---------------- */
+
+function stickScroll(pre, mutate) {
+  const pinned = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 48;
+  mutate();
+  if (pinned) pre.scrollTop = pre.scrollHeight;
+}
+
+function closeLivePanel() {
+  liveSel = null;
+  $("#live-panel").style.display = "none";
+}
+
+$("#btn-live-close").addEventListener("click", closeLivePanel);
+
+$("#inst-grid").addEventListener("click", (e) => {
+  const cell = e.target.closest(".inst-cell");
+  if (!cell || !cell.dataset.iid) return;
+  if (liveSel && liveSel.iid === cell.dataset.iid) { closeLivePanel(); return; }
+  openLivePanel(cell.dataset.iid);
+});
+
+function openLivePanel(iid) {
+  const entries = liveEntries
+    .filter((e) => e.instance_id === iid)
+    .sort((a, b) => (a.provider_role + a.run_index)
+      .localeCompare(b.provider_role + b.run_index));
+  liveSel = null;
+  $("#live-panel").style.display = "block";
+  $("#live-iid").textContent = iid;
+  $("#live-meta").innerHTML = "";
+  $("#live-tabs").innerHTML = "";
+  $("#live-reasoning").textContent = "";
+  $("#live-content").textContent = "";
+  $("#live-r-len").textContent = "";
+  $("#live-c-len").textContent = "";
+  if (!entries.length) {
+    $("#live-meta").innerHTML =
+      `该实例暂无实时数据:尚未执行到该题、基线为复用导入(不实跑),或服务重启导致进程内缓冲丢失。` +
+      `完成的实例可在「📊 结果报告」页查看记录与失败轨迹。`;
+    $("#live-body").style.display = "none";
+    return;
+  }
+  $("#live-body").style.display = "";
+  // 多条目(A/B、S2 复测)用页签切换,默认选正在流式输出的那个
+  $("#live-tabs").innerHTML = entries.map((e, i) =>
+    `<button class="btn sm${i === pickLiveEntry(entries) ? " primary" : ""}"
+       data-role="${esc(e.provider_role)}" data-run="${e.run_index}">
+       ${e.provider_role === "baseline" ? "A" : "B"}·r${e.run_index}${e.status === "streaming" ? " ●" : ""}</button>`).join("");
+  $("#live-tabs").querySelectorAll("button").forEach((btn) =>
+    btn.addEventListener("click", () => switchLiveTab(iid, btn.dataset.role, +btn.dataset.run)));
+  const first = entries[pickLiveEntry(entries)];
+  switchLiveTab(iid, first.provider_role, first.run_index);
+}
+
+function pickLiveEntry(entries) {
+  const idx = entries.findIndex((e) => e.status === "streaming");
+  return idx >= 0 ? idx : entries.length - 1;
+}
+
+function switchLiveTab(iid, role, runIndex) {
+  liveSel = { iid, role, runIndex, rOffset: 0, cOffset: 0 };
+  $("#live-reasoning").textContent = "";
+  $("#live-content").textContent = "";
+  $("#live-r-len").textContent = "";
+  $("#live-c-len").textContent = "";
+  $("#live-tabs").querySelectorAll("button").forEach((btn) =>
+    btn.classList.toggle("primary",
+      btn.dataset.role === role && +btn.dataset.run === runIndex));
+  updateLivePanel(true);
+}
+
+async function updateLivePanel(immediate = false) {
+  if (!liveSel || !selectedRunId) return;
+  const { iid, role, runIndex, rOffset, cOffset } = liveSel;
+  const meta = liveEntries.find((e) =>
+    e.instance_id === iid && e.provider_role === role && e.run_index === runIndex);
+  if (!meta) {
+    $("#live-meta").innerHTML = "实时缓冲已失效(实例尚未开始或缓冲被清理)。";
+    return;
+  }
+  const finished = meta.status === "done"
+    && meta.reasoning_chars <= rOffset && meta.content_chars <= cOffset;
+  if (finished && !immediate) return;   // 已取完且结束,跳过本轮
+  let d;
+  try {
+    d = await api(`/api/runs/${selectedRunId}/live-detail`
+      + `?instance_id=${encodeURIComponent(iid)}&role=${encodeURIComponent(role)}`
+      + `&run_index=${runIndex}&r_offset=${rOffset}&c_offset=${cOffset}`);
+  } catch (err) { $("#live-meta").innerHTML = esc(err.message); return; }
+  liveSel.rOffset = d.r_offset;
+  liveSel.cOffset = d.c_offset;
+  const rPre = $("#live-reasoning"), cPre = $("#live-content");
+  if (d.reasoning_part) stickScroll(rPre, () => { rPre.textContent += d.reasoning_part; });
+  if (d.content_part) stickScroll(cPre, () => { cPre.textContent += d.content_part; });
+  $("#live-r-len").textContent = `${d.reasoning_chars} 字符`;
+  $("#live-c-len").textContent = `${d.content_chars} 字符`;
+  $("#live-meta").innerHTML =
+    `<b>${esc(d.model)}</b> · ${role === "baseline" ? "A(基线)" : "B(候选)"} · ${esc(d.phase)} · run ${runIndex}` +
+    (d.status === "streaming"
+      ? ' · <span style="color:#2563eb">● 流式输出中…</span>'
+      : ` · 已结束 finish=${esc(d.finish_reason || "—")}`)
+    + ` · 更新于 ${esc((d.updated_at || "").replace("T", " ").slice(11, 23))} UTC`;
 }
 
 $("#btn-cancel").addEventListener("click", async () => {
@@ -437,6 +749,8 @@ function renderReportDom(rep) {
       ${ab ? `<div class="stat-card"><div class="k">稳定 baseline-only</div><div class="v">${rep.stable_baseline_only.length}</div><div class="s">复测后仍同方向</div></div>` : ""}
       <div class="stat-card"><div class="k">Cost / Solved · A</div><div class="v">${cs.baseline.cost_per_solved != null ? "$" + cs.baseline.cost_per_solved : "—"}</div><div class="s">总 $${cs.baseline.total_cost_usd}</div></div>
       ${ab ? `<div class="stat-card"><div class="k">Cost / Solved · B</div><div class="v">${cs.candidate.cost_per_solved != null ? "$" + cs.candidate.cost_per_solved : "—"}</div><div class="s">总 $${cs.candidate.total_cost_usd}</div></div>` : ""}
+      <div class="stat-card"><div class="k">输出截断 · A</div><div class="v" style="${cs.baseline.truncated_runs ? "color:var(--red)" : ""}">${cs.baseline.truncated_runs}</div><div class="s">finish=length 次数</div></div>
+      ${ab ? `<div class="stat-card"><div class="k">输出截断 · B</div><div class="v" style="${cs.candidate.truncated_runs ? "color:var(--red)" : ""}">${cs.candidate.truncated_runs}</div><div class="s">finish=length 次数</div></div>` : ""}
     </div>
   </div>`;
 
@@ -504,9 +818,11 @@ function renderReportDom(rep) {
       ${ab ? `<td class="mono">${t.runs_b ? t.runs_b.split("").map(runTag).join("") : "—"}</td>` : ""}
       <td class="mono">${t.wall_a ?? "—"}s</td>
       ${ab ? `<td class="mono">${t.wall_b ?? "—"}s</td>` : ""}
+      <td class="mono">${t.turns_a ?? "—"}</td>
+      ${ab ? `<td class="mono">${t.turns_b ?? "—"}</td>` : ""}
     </tr>
     <tr class="detail-row" id="detail-${idx}" style="display:none">
-      <td colspan="${ab ? 12 : 9}"><div class="task-detail" data-loaded="0" data-iid="${esc(t.instance_id)}">点击展开加载明细…</div></td>
+      <td colspan="${ab ? 14 : 10}"><div class="task-detail" data-loaded="0" data-iid="${esc(t.instance_id)}">点击展开加载明细…</div></td>
     </tr>`;
   }).join("");
 
@@ -531,6 +847,7 @@ function renderReportDom(rep) {
         <th>Baseline</th>${ab ? "<th>Candidate</th><th>稳定?</th>" : ""}
         <th>Runs A</th>${ab ? "<th>Runs B</th>" : ""}
         <th>Wall A</th>${ab ? "<th>Wall B</th>" : ""}
+        <th>Turns A</th>${ab ? "<th>Turns B</th>" : ""}
       </tr></thead>
       <tbody>${taskRows}</tbody>
     </table></div>
@@ -583,14 +900,34 @@ async function toggleTaskDetail(tr, rep) {
     try {
       const traj = await api(`/api/runs/${rep.run_id}/artifact`, "POST", { name: btn.dataset.name });
       const rec = traj.record || {};
+      const truncated = rec.truncated || rec.finish_reason === "length";
+      const response = traj.response || "";
+      const reasoning = traj.reasoning || "";
+      const ag = traj.agent || {};
+      const transcript = ag.turns != null ? (traj.trajectory || []) : null;
+      const toolLines = transcript
+        ? transcript.filter((m) => m.role === "tool")
+          .map((m, i) => `#${i + 1} ${(m.name || "tool")} → ${String(m.content || "").split("\n")[0].slice(0, 120)}`)
+          : null;
       view.innerHTML = `
         <div style="font-size:12px;color:var(--muted);margin-bottom:6px">
           模型 <b>${esc(traj.model)}</b> · ${esc(traj.provider_role)} · run ${traj.run_index} · ${esc(traj.eval_detail || "")}<br>
           tokens in/out = ${rec.usage?.prompt_tokens ?? 0}/${rec.usage?.completion_tokens ?? 0}
           · TTFT ${rec.ttft_s ?? "—"}s · wall ${rec.wall_s ?? "—"}s · finish=${esc(rec.finish_reason || "—")}
+          ${ag.turns != null ? ` · <b>scaffold=${esc(traj.scaffold || "agent")}</b>:${ag.turns} 轮 / ${ag.tool_calls ?? rec.tool_calls ?? 0} 次工具调用${ag.tool_errors ? `(含 ${ag.tool_errors} 次出错)` : ""}${ag.submitted ? " · 已主动 submit" : " · 未 submit(轮次耗尽或异常退出)"}` : ""}
           ${rec.errors?.length ? `<br><span style="color:var(--red)">errors: ${esc(rec.errors.join(" | ").slice(0, 300))}</span>` : ""}
         </div>
-        <pre class="patch">${esc((traj.response || "").slice(0, 3000))}</pre>`;
+        ${truncated ? `<div style="font-size:12.5px;color:var(--red);margin-bottom:6px">⚠ 输出被 max_tokens 截断(finish_reason=length):模型未产出完整补丁,本题按失败判定。推理模型的思考 token 计入同一预算,请调高 Max Output Tokens 或设置 Reasoning Effort。</div>` : ""}
+        ${toolLines && toolLines.length ? `<details style="margin-bottom:6px">
+          <summary style="font-size:12px;cursor:pointer">工具调用记录(${toolLines.length} 次,逐轮)</summary>
+          <pre class="patch" style="max-height:220px;overflow:auto">${esc(toolLines.join("\n"))}</pre>
+        </details>` : ""}
+        <div style="font-size:12px;margin-bottom:4px"><b>模型输出(content${ag.turns != null ? " = 工作区补丁" : ""})</b>${response ? "" : ' — <span style="color:var(--red)">为空</span>'}</div>
+        <pre class="patch">${esc(response.slice(0, 3000))}</pre>
+        ${reasoning ? `<details style="margin-top:6px">
+          <summary style="font-size:12px;cursor:pointer">思考过程(reasoning,共 ${reasoning.length} 字符${reasoning.length > 10000 ? ",仅显示前 10000" : ""})</summary>
+          <pre class="patch" style="max-height:300px;overflow:auto">${esc(reasoning.slice(0, 10000))}</pre>
+        </details>` : ""}`;
       view.dataset.loaded = "1";
     } catch (err) { view.innerHTML = `<div class="empty">${esc(err.message)}</div>`; }
   }));
@@ -698,3 +1035,4 @@ async function showSuite(suiteId) {
 refreshRuns();
 loadReportOptions();
 loadPool();
+refreshProfiles();

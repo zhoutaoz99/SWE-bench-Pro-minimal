@@ -14,6 +14,46 @@ RunStatus = Literal[
 ]
 
 
+class ProviderRouting(BaseModel):
+    """OpenRouter Provider Routing:请求体顶层 `provider` 对象。
+
+    仅对支持路由的网关(如 OpenRouter)生效,其他 OpenAI 兼容端点留空即可。
+    - only:硬限制,只允许列出的 Provider,不可用则请求直接失败;
+    - ignore:排除列出的 Provider;
+    - order:按优先顺序尝试;
+    - allow_fallbacks=False 时禁用降级(仅在 order/only 命中失败后不换 Provider)。
+    """
+    order: list[str] = Field(default_factory=list)
+    only: list[str] = Field(default_factory=list)
+    ignore: list[str] = Field(default_factory=list)
+    allow_fallbacks: Optional[bool] = None
+    quantizations: list[str] = Field(default_factory=list)
+    sort: Optional[Literal["price", "throughput"]] = None
+    require_parameters: Optional[bool] = None
+    data_policy: Optional[Literal["deny", "flexible"]] = None
+
+    def is_empty(self) -> bool:
+        return not any(
+            (self.order, self.only, self.ignore, self.quantizations,
+             self.allow_fallbacks, self.sort, self.require_parameters,
+             self.data_policy))
+
+    def to_request_dict(self) -> dict:
+        """生成剔除空字段后的请求体 provider 对象。"""
+        if self.is_empty():
+            return {}
+        out: dict = {}
+        for key in ("order", "only", "ignore", "quantizations"):
+            value = getattr(self, key)
+            if value:
+                out[key] = value
+        for key in ("allow_fallbacks", "sort", "require_parameters", "data_policy"):
+            value = getattr(self, key)
+            if value is not None:
+                out[key] = value
+        return out
+
+
 class ProviderConfig(BaseModel):
     """单个推理 Provider 的连接与采样参数(设计文档 §10:显式锁参)。"""
     name: str = "Provider"
@@ -21,16 +61,20 @@ class ProviderConfig(BaseModel):
     model: str = ""
     api_key: str = ""
     role: Literal["baseline", "candidate"] = "baseline"
-    # 模型参数:不依赖 Provider 端默认值
-    temperature: float = 0.0
-    top_p: float = 1.0
-    max_tokens: int = 8192
-    reasoning_effort: Optional[str] = None
+    # 模型参数:不依赖 Provider 端默认值。
+    # 注意:推理模型的思考 token 计入 max_tokens,预算不足会先于补丁输出耗尽(finish_reason=length)
+    temperature: float = 1.0
+    top_p: float = 0.95
+    max_tokens: int = 32768
+    # 默认 max(最大思考力度);置 None/清空则请求不携带该参数(端点不支持时可清空)
+    reasoning_effort: Optional[str] = "max"
     # 计费(美元 / 百万 token),留空则成本按 token 数报告
     price_input_per_m: float = 0.0
     price_cached_per_m: float = 0.0
     price_output_per_m: float = 0.0
     auto_append_v1: bool = True
+    # OpenRouter 等网关的 Provider 路由(请求体顶层 provider 对象),留空不发送
+    provider: Optional[ProviderRouting] = None
 
 
 class Instance(BaseModel):
@@ -84,7 +128,10 @@ class RunRequest(BaseModel):
     suite_seed: int = 20260816
     suite_id: Optional[str] = None                # 复用已生成的套件
     repeat_disagreements: int = 2                 # S2 分歧复测次数(首次+2=3-run majority)
-    turn_limit: int = 50
+    # 评测 scaffold:agent = 官方 SWE-Agent 形态的多轮工具循环(默认);
+    # single-turn = 旧版单轮补丁生成。两端必须同 scaffold 才可比。
+    scaffold: Literal["agent", "single-turn"] = "agent"
+    turn_limit: int = 200                         # Agent 模式每任务最大轮数(对齐官方)
 
 
 class UsageInfo(BaseModel):
@@ -112,6 +159,7 @@ class RunRecord(BaseModel):
     wall_s: float = 0.0
     decode_tps: Optional[float] = None
     finish_reason: Optional[str] = None
+    truncated: bool = False               # finish_reason == "length",输出被 max_tokens 截断
     tool_errors: int = 0
     errors: list[str] = Field(default_factory=list)
     cost_usd: float = 0.0
@@ -119,3 +167,6 @@ class RunRecord(BaseModel):
     patch_excerpt: str = ""
     started_at: str = ""
     ended_at: str = ""
+    # Agent scaffold 专用:实际使用的轮数 / 工具调用次数(单轮模式为 0)
+    turns_used: int = 0
+    tool_calls: int = 0

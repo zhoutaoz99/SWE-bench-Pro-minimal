@@ -44,21 +44,71 @@
         <div class="hint" id="reuse-hint">选择一次已完成的基线单端运行;套件与评测模式将自动沿用该运行。</div>
       </div>
       <div class="form-grid" data-provider="a" id="form-a" style="margin-top:10px">
+        <div class="span-2 profile-row">
+          <select id="profile-select-a" class="select profile-select" title="选择已保存的 Provider 配置并载入表单"></select>
+          <button class="btn sm" type="button" id="btn-save-a" title="以当前「名称」保存表单配置(同名覆盖)">💾 保存</button>
+          <button class="btn sm danger" type="button" id="btn-del-profile-a" title="删除当前选中的已保存配置">🗑</button>
+        </div>
         <label>名称<input name="name" value="Baseline"></label>
         <label class="span-2">Base URL
           <input name="base_url" placeholder="https://api.example.com/v1">
         </label>
         <label>Model ID<input name="model" placeholder="例如 deepseek-v3.1"></label>
         <label>API Key<input name="api_key" type="password" placeholder="sk-...(必填)"></label>
-        <label>Temperature<input name="temperature" type="number" step="0.1" min="0" max="2" value="0"></label>
-        <label>Top P<input name="top_p" type="number" step="0.05" min="0" max="1" value="1"></label>
-        <label>Max Output Tokens<input name="max_tokens" type="number" step="256" min="256" value="8192"></label>
-        <label>Reasoning Effort<input name="reasoning_effort" placeholder="low/medium/high(可选)"></label>
+        <label>Temperature<input name="temperature" type="number" step="0.1" min="0" max="2" value="1"></label>
+        <label>Top P<input name="top_p" type="number" step="0.05" min="0" max="1" value="0.95"></label>
+        <label>Max Output Tokens<input name="max_tokens" type="number" step="256" min="256" value="32768"></label>
+        <label>Reasoning Effort<input name="reasoning_effort" placeholder="low/medium/high/max(留空不发送)" value="max"></label>
+        <details class="span-2 routing-box">
+          <summary>Provider 路由(OpenRouter 扩展,可选)</summary>
+          <div class="form-grid" style="margin-top:8px">
+            <label class="span-2">Only(只允许,逗号分隔)
+              <input name="pr_only" placeholder="例如 deepinfra — 硬限制,不可用则请求失败">
+            </label>
+            <label class="span-2">Ignore(排除,逗号分隔)
+              <input name="pr_ignore" placeholder="例如 google,openai">
+            </label>
+            <label class="span-2">Order(优先顺序,逗号分隔)
+              <input name="pr_order" placeholder="例如 deepinfra,fireworks-ai">
+            </label>
+            <label>Allow Fallbacks
+              <select name="pr_allow_fallbacks">
+                <option value="">默认(允许)</option>
+                <option value="false">false(禁止降级)</option>
+              </select>
+            </label>
+            <label>Sort
+              <select name="pr_sort">
+                <option value="">默认</option>
+                <option value="price">price(按价格)</option>
+                <option value="throughput">throughput(按吞吐)</option>
+              </select>
+            </label>
+            <label>Require Parameters
+              <select name="pr_require_parameters">
+                <option value="">默认</option>
+                <option value="true">true(须支持全部参数)</option>
+              </select>
+            </label>
+            <label>Data Policy
+              <select name="pr_data_policy">
+                <option value="">默认</option>
+                <option value="deny">deny(禁止训练/日志)</option>
+                <option value="flexible">flexible</option>
+              </select>
+            </label>
+          </div>
+          <div class="hint">对应请求体顶层 <code>provider</code> 对象(如 <code>{"only":["deepinfra"]}</code>);非 OpenRouter 端点请保持折叠留空。</div>
+        </details>
         <div class="span-2 price-row">
           <span class="price-title">价格($/1M tokens,可选)</span>
           <input name="price_input_per_m" type="number" step="0.1" min="0" placeholder="输入" title="输入">
           <input name="price_cached_per_m" type="number" step="0.1" min="0" placeholder="缓存" title="缓存">
           <input name="price_output_per_m" type="number" step="0.1" min="0" placeholder="输出" title="输出">
+        </div>
+        <div class="span-2 test-row">
+          <button class="btn sm" type="button" id="btn-test-a" title="发送一次最小请求验证端点、密钥、模型与路由配置">🔌 测试连通</button>
+          <span class="test-status" id="test-status-a"></span>
         </div>
       </div>
     </div>
@@ -72,21 +122,71 @@
         </label>
       </div>
       <div class="form-grid" data-provider="b" id="form-b">
+        <div class="span-2 profile-row">
+          <select id="profile-select-b" class="select profile-select" title="选择已保存的 Provider 配置并载入表单"></select>
+          <button class="btn sm" type="button" id="btn-save-b" title="以当前「名称」保存表单配置(同名覆盖)">💾 保存</button>
+          <button class="btn sm danger" type="button" id="btn-del-profile-b" title="删除当前选中的已保存配置">🗑</button>
+        </div>
         <label>名称<input name="name" value="Candidate"></label>
         <label class="span-2">Base URL
           <input name="base_url" placeholder="https://api.example.com/v1">
         </label>
         <label>Model ID<input name="model" placeholder="与 A 相同模型对比 Provider"></label>
         <label>API Key<input name="api_key" type="password" placeholder="sk-...(必填)"></label>
-        <label>Temperature<input name="temperature" type="number" step="0.1" min="0" max="2" value="0"></label>
-        <label>Top P<input name="top_p" type="number" step="0.05" min="0" max="1" value="1"></label>
-        <label>Max Output Tokens<input name="max_tokens" type="number" step="256" min="256" value="8192"></label>
-        <label>Reasoning Effort<input name="reasoning_effort" placeholder="low/medium/high(可选)"></label>
+        <label>Temperature<input name="temperature" type="number" step="0.1" min="0" max="2" value="1"></label>
+        <label>Top P<input name="top_p" type="number" step="0.05" min="0" max="1" value="0.95"></label>
+        <label>Max Output Tokens<input name="max_tokens" type="number" step="256" min="256" value="32768"></label>
+        <label>Reasoning Effort<input name="reasoning_effort" placeholder="low/medium/high/max(留空不发送)" value="max"></label>
+        <details class="span-2 routing-box">
+          <summary>Provider 路由(OpenRouter 扩展,可选)</summary>
+          <div class="form-grid" style="margin-top:8px">
+            <label class="span-2">Only(只允许,逗号分隔)
+              <input name="pr_only" placeholder="例如 deepinfra — 硬限制,不可用则请求失败">
+            </label>
+            <label class="span-2">Ignore(排除,逗号分隔)
+              <input name="pr_ignore" placeholder="例如 google,openai">
+            </label>
+            <label class="span-2">Order(优先顺序,逗号分隔)
+              <input name="pr_order" placeholder="例如 deepinfra,fireworks-ai">
+            </label>
+            <label>Allow Fallbacks
+              <select name="pr_allow_fallbacks">
+                <option value="">默认(允许)</option>
+                <option value="false">false(禁止降级)</option>
+              </select>
+            </label>
+            <label>Sort
+              <select name="pr_sort">
+                <option value="">默认</option>
+                <option value="price">price(按价格)</option>
+                <option value="throughput">throughput(按吞吐)</option>
+              </select>
+            </label>
+            <label>Require Parameters
+              <select name="pr_require_parameters">
+                <option value="">默认</option>
+                <option value="true">true(须支持全部参数)</option>
+              </select>
+            </label>
+            <label>Data Policy
+              <select name="pr_data_policy">
+                <option value="">默认</option>
+                <option value="deny">deny(禁止训练/日志)</option>
+                <option value="flexible">flexible</option>
+              </select>
+            </label>
+          </div>
+          <div class="hint">对应请求体顶层 <code>provider</code> 对象(如 <code>{"only":["deepinfra"]}</code>);非 OpenRouter 端点请保持折叠留空。</div>
+        </details>
         <div class="span-2 price-row">
           <span class="price-title">价格($/1M tokens,可选)</span>
-          <input name="price_input_per_m" type="number" step="0.1" min="0" placeholder="输入">
-          <input name="price_cached_per_m" type="number" step="0.1" min="0" placeholder="缓存">
-          <input name="price_output_per_m" type="number" step="0.1" min="0" placeholder="输出">
+          <input name="price_input_per_m" type="number" step="0.1" min="0" placeholder="输入" title="输入">
+          <input name="price_cached_per_m" type="number" step="0.1" min="0" placeholder="缓存" title="缓存">
+          <input name="price_output_per_m" type="number" step="0.1" min="0" placeholder="输出" title="输出">
+        </div>
+        <div class="span-2 test-row">
+          <button class="btn sm" type="button" id="btn-test-b" title="发送一次最小请求验证端点、密钥、模型与路由配置">🔌 测试连通</button>
+          <span class="test-status" id="test-status-b"></span>
         </div>
       </div>
     </div>
@@ -108,6 +208,19 @@
         <div class="setting-label">抽样 Seed</div>
         <input id="suite-seed" type="number" value="20260816" class="seed-input">
         <div class="hint">套件版本指纹组成部分,同 seed 完全可复现。</div>
+      </div>
+      <div class="setting" id="setting-scaffold">
+        <div class="setting-label">Scaffold(评测模式)</div>
+        <div class="segment" id="scaffold-mode">
+          <button data-v="agent" class="active">多轮 Agent<small>对齐官方</small></button>
+          <button data-v="single-turn">单轮补丁<small>旧行为</small></button>
+        </div>
+        <div class="hint">多轮 Agent:模型通过 bash / 查看文件 / 编辑文件工具在工作区内迭代解题,最后提交变更(官方 SWE-Agent 形态的最小本地实现,命令在宿主机工作区执行)。</div>
+      </div>
+      <div class="setting" id="setting-turns">
+        <div class="setting-label">轮次上限</div>
+        <input id="turn-limit" type="number" min="1" max="500" value="200" class="seed-input">
+        <div class="hint">Agent 模式每任务最大对话轮数(官方为 200);单轮模式忽略此项。轮数越多、单任务 API 调用越多,注意成本。</div>
       </div>
       <div class="setting">
         <div class="setting-label">分歧复测次数</div>
@@ -150,6 +263,24 @@
       <span class="phase-badge" id="phase-badge">-</span>
     </div>
     <div class="inst-grid" id="inst-grid"></div>
+    <div style="font-size:11.5px;color:var(--muted);margin-top:6px">
+      💡 点击实例卡片可实时查看该题的流式输出(思考过程与补丁正文,约 1.2s 刷新)
+    </div>
+    <div id="live-panel" style="display:none;margin-top:12px;border:1px solid #e2e8f0;border-radius:8px;padding:12px;background:#fbfdff">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <h3 style="font-size:14px;margin:0">实时输出 · <span class="mono" id="live-iid"></span></h3>
+        <div id="live-tabs" style="display:flex;gap:6px"></div>
+        <span style="flex:1"></span>
+        <button class="btn sm" id="btn-live-close">收起</button>
+      </div>
+      <div id="live-meta" style="font-size:12px;color:var(--muted);margin:8px 0"></div>
+      <div id="live-body">
+        <div style="font-size:12px;margin:6px 0 4px"><b>思考过程(reasoning)</b> <span id="live-r-len" style="color:var(--muted)"></span></div>
+        <pre id="live-reasoning" class="patch" style="max-height:220px;min-height:60px;overflow:auto;white-space:pre-wrap;margin:0"></pre>
+        <div style="font-size:12px;margin:12px 0 4px"><b>模型输出(content)</b> <span id="live-c-len" style="color:var(--muted)"></span></div>
+        <pre id="live-content" class="patch" style="max-height:280px;min-height:60px;overflow:auto;white-space:pre-wrap;margin:0"></pre>
+      </div>
+    </div>
   </div>
 </section>
 

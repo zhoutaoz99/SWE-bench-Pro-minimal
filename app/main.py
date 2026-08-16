@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import dataset, difficulty, sampler
+from . import dataset, difficulty, live, sampler
 from .runner import SECRET_VAULT, RunEngine
 from .schemas import ProviderConfig, RunRequest, SuiteLevel, SuiteManifest
 from .store import RunStore
@@ -129,7 +129,68 @@ def jsonable(manifest) -> dict:
     return json.loads(manifest.model_dump_json())
 
 
+# ---------------- Provider 配置档案 ----------------
+
+class SaveProfileBody(BaseModel):
+    name: str
+    config: ProviderConfig
+
+
+@app.get("/api/provider-profiles")
+def list_provider_profiles() -> list[dict]:
+    return store.list_profiles()
+
+
+@app.post("/api/provider-profiles")
+def save_provider_profile(body: SaveProfileBody) -> dict:
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(422, "配置名称不能为空")
+    if not body.config.base_url.strip() or not body.config.model.strip():
+        raise HTTPException(422, "必须填写 base_url 与 model 才能保存")
+    return store.save_profile(name, body.config)
+
+
+@app.delete("/api/provider-profiles/{pid}")
+def delete_provider_profile(pid: str) -> dict:
+    if not store.delete_profile(pid):
+        raise HTTPException(404, f"provider profile not found: {pid}")
+    return {"deleted": pid}
+
+
 # ---------------- 运行 ----------------
+
+class TestProviderBody(BaseModel):
+    provider: ProviderConfig
+
+
+@app.post("/api/test-provider")
+async def test_provider(body: TestProviderBody) -> dict:
+    """连通性测试:单次最小请求(不重试、30s 超时),走与评测一致的请求路径,
+    因此同时验证 base_url / api_key / model 以及 OpenRouter 路由配置。"""
+    from .provider import LiveProvider  # noqa: PLC0415
+
+    p = body.provider
+    if not p.base_url.strip() or not p.model.strip():
+        raise HTTPException(422, "请先填写 Base URL 与 Model ID 再测试连通")
+    cfg = p.model_copy(update={"max_tokens": min(p.max_tokens, 16)})
+    result = await LiveProvider(cfg).complete(
+        "You are a connectivity test.",
+        "Reply with exactly: ok",
+        retries=0, timeout=30.0)
+    return {
+        "ok": result.ok,
+        "wall_s": round(result.wall_s, 3),
+        "ttft_s": round(result.ttft_s, 3) if result.ttft_s is not None else None,
+        "finish_reason": result.finish_reason,
+        "completion_tokens": result.completion_tokens,
+        "reasoning_chars": len(result.reasoning),
+        "errors": result.errors,
+        "model": cfg.model,
+        "provider_routing": (cfg.provider.to_request_dict()
+                             if cfg.provider and not cfg.provider.is_empty() else {}),
+    }
+
 
 @app.get("/api/baselines")
 def list_baselines() -> list[dict]:
@@ -158,6 +219,12 @@ def _resolve_reused_baseline(request: RunRequest) -> tuple[Optional[SuiteManifes
         raise HTTPException(
             422, f"套件不一致:基线运行使用 {suite.suite_id},本次选择了 {request.suite_id};"
                  f"复用基线时必须使用同一套件")
+    b_scaffold = breq.get("scaffold") or "single-turn"
+    if b_scaffold != request.scaffold:
+        raise HTTPException(
+            422, f"scaffold 不一致:基线运行是 {b_scaffold},本次是 {request.scaffold};"
+                 f"复用基线时两端必须用同一 scaffold 才可比"
+                 f"(旧基线为单轮模式,请在评测设置中切换)")
     # 套件文件可能被清理,落盘一次保证幂等
     store.save_suite(suite)
 
@@ -175,6 +242,7 @@ def _resolve_reused_baseline(request: RunRequest) -> tuple[Optional[SuiteManifes
         price_input_per_m=bpa.get("price_input_per_m", 0.0),
         price_cached_per_m=bpa.get("price_cached_per_m", 0.0),
         price_output_per_m=bpa.get("price_output_per_m", 0.0),
+        provider=bpa.get("provider"),
     )
     return suite, breq
 
@@ -240,6 +308,33 @@ def get_run_state(run_id: str) -> dict:
     return state
 
 
+@app.get("/api/runs/{run_id}/live")
+def get_run_live(run_id: str) -> dict:
+    """实时视图元信息:当前执行位置 + 各实例实时缓冲的长度/状态(不含正文)。"""
+    state = store.load_state(run_id)
+    if state is None:
+        raise HTTPException(404, f"run not found: {run_id}")
+    return {
+        "status": state.get("status"),
+        "current": (state.get("progress") or {}).get("current"),
+        "entries": live.list_entries(run_id),
+    }
+
+
+@app.get("/api/runs/{run_id}/live-detail")
+def get_run_live_detail(run_id: str, instance_id: str, role: str,
+                        run_index: int = 0, r_offset: int = 0,
+                        c_offset: int = 0) -> dict:
+    """增量正文:r/c_offset 为已收到的字符数,返回其后新增切片与新偏移。"""
+    if store.load_state(run_id) is None:
+        raise HTTPException(404, f"run not found: {run_id}")
+    detail = live.get_detail(run_id, instance_id, role, run_index,
+                             r_offset, c_offset)
+    if detail is None:
+        raise HTTPException(404, "live entry not found (尚未开始或缓冲已失效)")
+    return detail
+
+
 @app.get("/api/runs/{run_id}/report")
 def get_run_report(run_id: str) -> dict:
     if store.load_state(run_id) is None:
@@ -293,6 +388,7 @@ async def delete_run(run_id: str) -> dict:
     import shutil  # noqa: PLC0415
     shutil.rmtree(store.run_dir(run_id), ignore_errors=True)
     SECRET_VAULT.pop(run_id, None)
+    live.drop_run(run_id)
     return {"deleted": run_id}
 
 
