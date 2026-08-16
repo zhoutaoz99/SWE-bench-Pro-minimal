@@ -2,8 +2,8 @@ import path from 'node:path';
 import { RunStore, recordsToCsv } from './store';
 import * as analyzer from './analyzer';
 import * as livemod from './live';
-import { AgentWorkspace, AGENT_TOOLS } from './workspace';
-import { evaluateHeuristic } from './evaluator';
+import { AgentWorkspace, AGENT_TOOLS, AgentWorkspaceOptions } from './workspace';
+import { evaluateOfficialDocker } from './evaluator';
 import {
   LiveProvider,
   CompletionResult,
@@ -64,79 +64,22 @@ export class RunEngine {
     const suite = state.suite as Record<string, any>;
     const instances = byDifficulty(suite.instances as Array<Record<string, any>>);
 
-    const providers: Record<string, ProviderConfig> = {};
-    if (req.baseline_run_id) {
-      providers.candidate = req.provider_b!;
-    } else {
-      providers.baseline = req.provider_a!;
-      if (req.provider_b) providers.candidate = req.provider_b;
-    }
+    const pconf = req.provider!;
+    const role = pconf.role || 'provider';
 
     try {
       throwIfAborted(signal);
-      this.store.updateState(runId, { status: 'running', phase: 'S1 主评测' });
-      if (req.baseline_run_id) {
-        const imported = this.store.importBaseline(runId, req.baseline_run_id);
-        const st = this.store.loadState(runId)!;
-        for (const rec of imported) {
-          const istat = (st.instance_status[rec.instance_id] ||= {});
-          const badge = rec.status !== 'ok' ? 'error' : rec.resolved ? 'pass' : 'fail';
-          istat[`baseline_r${rec.run_index}`] = badge;
-          if (rec.run_index === 0) istat.baseline = badge;
-        }
-        this.store.updateState(runId, { instance_status: st.instance_status });
-      }
+      this.store.updateState(runId, { status: 'running', phase: '评测中' });
 
       for (const inst of instances) {
-        for (const [role, pconf] of Object.entries(providers)) {
-          await sleep(0);
-          throwIfAborted(signal);
-          await this.runOnce(runId, inst, pconf, role, 0, 'S1', req.scaffold, req.turn_limit, signal);
-          const st = this.store.loadState(runId)!;
-          st.counts.s1 = (st.counts.s1 ?? 0) + 1;
-          st.progress.done = (st.counts.s1 ?? 0) + (st.counts.s2 ?? 0);
-          st.progress.current = null;
-          this.store.updateState(runId, { counts: st.counts, progress: st.progress });
-        }
-      }
-
-      if (providers.candidate) {
-        const records = this.store.loadRecords(runId);
-        const disagreements = analyzer.disagreementIds(records);
-        if (disagreements.length > 0 && req.repeat_disagreements > 0) {
-          this.store.updateState(runId, { phase: 'S2 分歧复测', status: 'retesting' });
-          const byId = new Map(instances.map((i) => [i.instance_id, i]));
-          const rank = new Map(instances.map((i, n) => [i.instance_id, n]));
-          disagreements.sort((a, b) => (rank.get(a) ?? rank.size) - (rank.get(b) ?? rank.size));
-          const st = this.store.loadState(runId)!;
-          st.progress.total =
-            st.progress.done +
-            disagreements.length * Object.keys(providers).length * req.repeat_disagreements;
-          this.store.updateState(runId, { progress: st.progress });
-          for (const iid of disagreements) {
-            for (let runIndex = 1; runIndex <= req.repeat_disagreements; runIndex++) {
-              for (const [role, pconf] of Object.entries(providers)) {
-                await sleep(0);
-                throwIfAborted(signal);
-                await this.runOnce(
-                  runId,
-                  byId.get(iid)!,
-                  pconf,
-                  role,
-                  runIndex,
-                  'S2',
-                  req.scaffold,
-                  req.turn_limit,
-                  signal,
-                );
-                const st2 = this.store.loadState(runId)!;
-                st2.counts.s2 = (st2.counts.s2 ?? 0) + 1;
-                st2.progress.done = (st2.counts.s1 ?? 0) + (st2.counts.s2 ?? 0);
-                this.store.updateState(runId, { counts: st2.counts, progress: st2.progress });
-              }
-            }
-          }
-        }
+        await sleep(0);
+        throwIfAborted(signal);
+        await this.runOnce(runId, inst, pconf, role, 0, 'main', req.scaffold, req.turn_limit, signal);
+        const st = this.store.loadState(runId)!;
+        st.counts.runs = (st.counts.runs ?? 0) + 1;
+        st.progress.done = st.counts.runs;
+        st.progress.current = null;
+        this.store.updateState(runId, { counts: st.counts, progress: st.progress });
       }
 
       this.store.updateState(runId, { status: 'analyzing', phase: '分析汇总' });
@@ -180,15 +123,20 @@ export class RunEngine {
     pconf: ProviderConfig,
     role: string,
     runIndex: number,
-    phase: 'S1' | 'S2',
+    phase: 'main',
     scaffold: string,
     turnLimit: number,
     signal?: AbortSignal,
   ): Promise<Record<string, any>> {
     const inst = toInstance(instDict);
-    const provider = new LiveProvider(pconf);
     const { system, user } = buildPrompt(inst);
     const started = new Date().toISOString();
+
+    const wsOptions: AgentWorkspaceOptions = {
+      docker: true,
+      image: inst.docker_image,
+      repoDir: inst.repo_directory || undefined,
+    };
 
     const st = this.store.loadState(runId)!;
     st.progress.current = { instance_id: inst.instance_id, role, phase };
@@ -211,36 +159,18 @@ export class RunEngine {
     );
     const agentMeta: Record<string, any> = {};
 
-    let completion: CompletionResult;
-    if (scaffold === 'agent') {
-      const [comp, meta] = await this.agentLoop(
-        runId,
-        inst,
-        pconf,
-        role,
-        runIndex,
-        liveKey,
-        turnLimit,
-        signal,
-      );
-      completion = comp;
-      Object.assign(agentMeta, meta);
-    } else {
-      completion = await provider.complete(system, user, {
-        onDelta: (kind, piece) => livemod.appendText(liveKey, kind, piece),
-        onStats: (u) =>
-          livemod.updateUsage(
-            liveKey,
-            {
-              prompt_tokens: u.prompt_tokens,
-              completion_tokens: u.completion_tokens,
-              cached_tokens: u.cached_tokens,
-            },
-            { decode_tps: u.decode_tps, elapsed_s: u.elapsed_s },
-          ),
-        signal,
-      });
-    }
+    const [completion, meta] = await this.agentLoop(
+      runId,
+      inst,
+      pconf,
+      role,
+      runIndex,
+      liveKey,
+      turnLimit,
+      signal,
+      wsOptions,
+    );
+    Object.assign(agentMeta, meta);
     // 确保最终 usage/速率/花费进入实时缓冲(流式未触发或最后一段被节流时兜底)
     livemod.updateUsage(
       liveKey,
@@ -255,7 +185,10 @@ export class RunEngine {
       },
     );
     livemod.finish(liveKey, completion.finish_reason, completion.errors);
-    const outcome = evaluateHeuristic(inst, completion);
+    const outcome = await evaluateOfficialDocker(inst, completion.text, {
+      image: inst.docker_image,
+      repoDir: inst.repo_directory || undefined,
+    });
 
     const cost = computeCost(
       pconf,
@@ -342,10 +275,12 @@ export class RunEngine {
     liveKey: string,
     turnLimit: number,
     signal?: AbortSignal,
+    wsOptions: AgentWorkspaceOptions = {},
   ): Promise<[CompletionResult, Record<string, any>]> {
     const safeId = inst.instance_id.replace(/[/:]/g, '_');
     const ws = new AgentWorkspace(
       path.join(this.store.runDir(runId), 'workspaces', safeId, `${role}_r${runIndex}`),
+      wsOptions,
     );
     ws.seed(inst);
     const provider = new LiveProvider(pconf);
@@ -472,6 +407,7 @@ export class RunEngine {
 
 
     let patch = ws.finalPatch();
+    ws.dispose();
     if (!patch.trim() && lastText.trim()) patch = lastText;
     completion.text = patch;
     completion.reasoning = reasoningParts.join('\n\n');
@@ -497,23 +433,24 @@ export class RunEngine {
 }
 
 function restoreRequest(data: Record<string, any>, secrets: Record<string, string>): RunRequest {
-  function fix(p: Record<string, any> | null | undefined, role: string): ProviderConfig | null {
+  function fix(p: Record<string, any> | null | undefined): ProviderConfig | null {
     if (!p) return null;
     const copy = { ...p };
-    const key = secrets[role];
+    const key = secrets.provider;
     if (key) copy.api_key = key;
+    copy.role = 'provider';
     return copy as ProviderConfig;
   }
   return {
-    provider_a: fix(data.provider_a, 'baseline'),
-    provider_b: fix(data.provider_b, 'candidate'),
-    baseline_run_id: data.baseline_run_id ?? null,
+    provider: fix(data.provider),
     suite_level: data.suite_level ?? 'smoke6',
     suite_seed: data.suite_seed ?? 0,
     suite_id: data.suite_id ?? null,
-    repeat_disagreements: data.repeat_disagreements ?? 2,
-    scaffold: data.scaffold || 'single-turn',
+    scaffold: 'agent',
     turn_limit: data.turn_limit ?? 50,
+    dataset_source: data.dataset_source ?? 'official',
+    docker_enabled: true,
+    evaluator: 'official',
   };
 }
 

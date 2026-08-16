@@ -40,6 +40,7 @@ $("#tabs").addEventListener("click", (e) => {
   $(`#tab-${btn.dataset.tab}`).classList.add("active");
   if (btn.dataset.tab === "monitor") { refreshRuns(); }
   if (btn.dataset.tab === "report") { loadReportOptions(); }
+  if (btn.dataset.tab === "compare") { loadCompareOptions(); }
   if (btn.dataset.tab === "pool") { loadPool(); }
 });
 
@@ -50,7 +51,7 @@ function gotoTab(name, runId = null) {
 }
 
 /* ---------------- 新建评测 ---------------- */
-const SEGMENTS = { "suite-level": "smoke6", "scaffold-mode": "agent" };
+const SEGMENTS = { "suite-level": "smoke6" };
 Object.keys(SEGMENTS).forEach((id) => {
   $(`#${id}`).addEventListener("click", (e) => {
     const btn = e.target.closest("button");
@@ -58,83 +59,13 @@ Object.keys(SEGMENTS).forEach((id) => {
     $$(`#${id} button`).forEach((b) => b.classList.remove("active"));
     btn.classList.add("active");
     SEGMENTS[id] = btn.dataset.v;
+    if (id === "suite-level") SELECTED_SUITE_ID = null;
   });
 });
 
-$("#enable-b").addEventListener("change", (e) => {
-  $("#form-b").classList.toggle("disabled", !e.target.checked);
-});
-
-/* ----- 基线来源:本次填写 / 复用已完成基线 ----- */
-let BASELINE_MODE = "new";
-let baselinesCache = [];
-
-$("#baseline-source").addEventListener("click", (e) => {
-  const btn = e.target.closest("button");
-  if (!btn) return;
-  $$("#baseline-source button").forEach((b) => b.classList.remove("active"));
-  btn.classList.add("active");
-  BASELINE_MODE = btn.dataset.v;
-  applyBaselineMode();
-});
-
-function applyBaselineMode() {
-  const reuse = BASELINE_MODE === "reuse";
-  $("#reuse-row").style.display = reuse ? "" : "none";
-  $("#form-a").classList.toggle("disabled", reuse);
-  // 复用基线时套件与评测模式由基线运行决定,锁定套件层级 / seed / scaffold / 轮次
-  $("#setting-suite").classList.toggle("disabled", reuse);
-  $("#suite-seed").disabled = reuse;
-  $("#setting-scaffold").classList.toggle("disabled", reuse);
-  $$("#scaffold-mode button").forEach((b) => { b.disabled = reuse; });
-  $("#turn-limit").disabled = reuse;
-  // 复用基线必须有候选端,锁定为启用
-  $("#enable-b").checked = true;
-  $("#enable-b").disabled = reuse;
-  $("#enable-b-wrap").style.opacity = reuse ? ".45" : "";
-  $("#enable-b-wrap").style.pointerEvents = reuse ? "none" : "";
-  $("#form-b").classList.remove("disabled");
-  if (reuse) loadBaselines();
-}
-
-function syncScaffoldFromBaseline(b) {
-  // scaffold 必须与基线一致(后端强校验);轮次对齐以保证公平
-  const sc = b.scaffold || "single-turn";
-  $$("#scaffold-mode button").forEach((btn) => {
-    btn.classList.toggle("active", btn.dataset.v === sc);
-  });
-  SEGMENTS["scaffold-mode"] = sc;
-  if (b.turn_limit) $("#turn-limit").value = b.turn_limit;
-}
-
-async function loadBaselines() {
-  try {
-    const list = await api("/api/baselines");
-    baselinesCache = list;
-    const sel = $("#reuse-baseline");
-    if (!list.length) {
-      sel.innerHTML = `<option value="">(暂无可复用的基线运行 — 先单独跑一次基线端)</option>`;
-      $("#reuse-hint").textContent = "没有已完成的单端基线运行。先在“新建评测”中取消勾选 A/B 对比、仅跑基线端,完成后即可在此复用。";
-      return;
-    }
-    sel.innerHTML = list.map((b) =>
-      `<option value="${b.run_id}">${b.run_id} · ${esc(b.model || "-")} · ${esc(b.suite_level)} · ${b.scaffold === "agent" ? "Agent" : "单轮"} · Resolved ${b.resolved ?? "-"}/${b.n_instances}</option>`
-    ).join("");
-    $("#reuse-hint").textContent = "基线记录(含成本/耗时)将原样导入本次运行;S2 分歧复测仅补跑候选端。";
-    sel.dispatchEvent(new Event("change"));
-  } catch (err) {
-    $("#reuse-hint").textContent = `基线列表加载失败:${err.message}`;
-  }
-}
-
-$("#reuse-baseline").addEventListener("change", (e) => {
-  const b = baselinesCache.find((x) => x.run_id === e.target.value);
-  if (!b) return;
-  syncScaffoldFromBaseline(b);
-  $("#reuse-hint").textContent =
-    `将沿用套件 ${b.suite_id}(${b.suite_version},${b.n_instances} 题,${b.scaffold || "single-turn"} 模式);` +
-    "S2 分歧复测仅补跑候选端,基线保持该运行的结果。";
-});
+/* ----- 已保存套件复用 ----- */
+let SELECTED_SUITE_ID = null;
+let suitesCache = [];
 
 function readProvider(role) {
   const grid = $(`[data-provider="${role}"]`);
@@ -152,11 +83,11 @@ function readProvider(role) {
   if (get("pr_require_parameters")) routing.require_parameters = get("pr_require_parameters") === "true";
   if (get("pr_data_policy")) routing.data_policy = get("pr_data_policy");
   return {
-    name: get("name") || (role === "a" ? "Baseline" : "Candidate"),
+    name: get("name") || "Provider",
     base_url: get("base_url"),
     model: get("model"),
     api_key: get("api_key"),
-    role: role === "a" ? "baseline" : "candidate",
+    role: "provider",
     temperature: num("temperature", 1.0),
     top_p: num("top_p", 0.95),
     max_tokens: Math.round(num("max_tokens", 32768)),
@@ -175,7 +106,7 @@ async function refreshProfiles() {
   try {
     profilesCache = await api("/api/provider-profiles");
   } catch (_) { profilesCache = []; }
-  ["a", "b"].forEach((role) => {
+  ["provider"].forEach((role) => {
     const sel = $(`#profile-select-${role}`);
     const cur = sel.value;
     sel.innerHTML = `<option value="">📂 已保存配置(${profilesCache.length})</option>` +
@@ -205,7 +136,7 @@ function fillProviderForm(role, conf) {
   set("pr_data_policy", pr.data_policy || "");
 }
 
-["a", "b"].forEach((role) => {
+["provider"].forEach((role) => {
   $(`#profile-select-${role}`).addEventListener("change", (e) => {
     const p = profilesCache.find((x) => x.id === e.target.value);
     if (!p) return;
@@ -228,9 +159,7 @@ function fillProviderForm(role, conf) {
       await refreshProfiles();
       $(`#profile-select-${role}`).value = res.id;
     } catch (err) {
-      const hint = /not found/i.test(err.message)
-        ? "(接口不存在:后端服务是旧进程,请重启后加载新功能)" : "";
-      toast(`保存失败:${err.message}${hint}`, 5200);
+      toast(`保存失败:${err.message}`, 5200);
     } finally {
       btn.disabled = false;
     }
@@ -269,7 +198,6 @@ async function testProviderConn(role) {
       const ttft = res.ttft_s != null ? ` · TTFT ${Math.round(res.ttft_s * 1000)}ms` : "";
       const only = res.provider_routing && res.provider_routing.only;
       const routing = only ? ` · 仅 ${only.join("/")}` : "";
-      // 思考型模型:16 token 预算内只够输出思维链,回答未产出属正常,但评测需更大预算
       const reasoning = res.reasoning_chars > 0
         ? ` · 思考型(本次 ${res.reasoning_chars} 字符思维链)` : "";
       status.className = "test-status ok";
@@ -288,37 +216,37 @@ async function testProviderConn(role) {
   }
 }
 
-$("#btn-test-a").addEventListener("click", () => testProviderConn("a"));
-$("#btn-test-b").addEventListener("click", () => testProviderConn("b"));
+$("#btn-test-provider").addEventListener("click", () => testProviderConn("provider"));
+
+function buildRunBody() {
+  return {
+    provider: readProvider("provider"),
+    suite_level: SEGMENTS["suite-level"],
+    suite_id: SELECTED_SUITE_ID,
+    scaffold: "agent",
+    turn_limit: parseInt($("#turn-limit").value) || 50,
+    dataset_source: "official",
+    docker_enabled: true,
+    evaluator: "official",
+  };
+}
+
+async function startRun(body) {
+  const res = await api("/api/runs", "POST", body);
+  toast(`评测已启动:${res.run_id}`);
+  gotoTab("monitor", res.run_id);
+}
 
 $("#btn-start").addEventListener("click", async () => {
-  const reuse = BASELINE_MODE === "reuse";
-  if (reuse && !$("#reuse-baseline").value) {
-    toast("请先选择一个可复用的基线运行(或切回“本次填写”)", 4200);
+  const body = buildRunBody();
+  if (!body.provider.base_url || !body.provider.model) {
+    toast("请先填写 Base URL 与 Model ID", 4200);
     return;
-  }
-  const body = {
-    provider_a: reuse ? null : readProvider("a"),
-    provider_b: $("#enable-b").checked ? readProvider("b") : null,
-    baseline_run_id: reuse ? $("#reuse-baseline").value : null,
-    suite_level: SEGMENTS["suite-level"],
-    suite_seed: parseInt($("#suite-seed").value) || 20260816,
-    repeat_disagreements: parseInt($("#repeat-dis").value) || 0,
-    scaffold: SEGMENTS["scaffold-mode"],
-    turn_limit: parseInt($("#turn-limit").value) || 200,
-  };
-  if (!reuse && !$("#enable-b").checked && !SEGMENTS_HINTED_SINGLE) {
-    SEGMENTS_HINTED_SINGLE = true;
-    toast("将仅运行基线端:完成后可作为基线源,在后续候选端评测中复用", 4600);
   }
   $("#btn-start").disabled = true;
   $("#start-note").textContent = "提交中…";
   try {
-    const res = await api("/api/runs", "POST", body);
-    toast(reuse && res.baseline_run_id
-      ? `评测已启动:${res.run_id}(基线复用 ${res.baseline_run_id})`
-      : `评测已启动:${res.run_id}`);
-    gotoTab("monitor", res.run_id);
+    await startRun(body);
   } catch (err) {
     toast(`启动失败:${err.message}`, 4200);
     $("#start-note").textContent = err.message;
@@ -327,22 +255,20 @@ $("#btn-start").addEventListener("click", async () => {
     setTimeout(() => { $("#start-note").textContent = ""; }, 5000);
   }
 });
-let SEGMENTS_HINTED_SINGLE = false;
 
 /* ---------------- 运行监控 ---------------- */
 let selectedRunId = null;
 let monitorTimer = null;
-let liveEntries = [];          // /live 元信息(长度/状态,不含正文)
-let liveSel = null;            // 当前查看的实时条目 {iid, role, runIndex, rOffset, cOffset}
+let liveEntries = [];
+let liveSel = null;
 
 const STATUS_BADGE = {
   queued: ["pending", "排队中"], running: ["running", "运行中"],
-  retesting: ["running", "S2 复测"], analyzing: ["running", "分析中"],
+  analyzing: ["running", "分析中"],
   completed: ["done", "已完成"], failed: ["fail", "失败"],
   cancelled: ["cancel", "已取消"],
 };
 
-// 终态运行才可删除(进行中的需先取消,与后端 DELETE 校验一致)
 const TERMINAL_STATUS = ["completed", "failed", "cancelled"];
 
 async function refreshRuns() {
@@ -356,10 +282,7 @@ async function refreshRuns() {
       <td class="mono">${esc(r.run_id)}</td>
       <td><span class="badge ${cls}">${label}</span></td>
       <td>${esc(r.suite_level || "-")}</td>
-      <td class="mono">${r.baseline_run_id
-        ? `<span title="基线复用自 ${esc(r.baseline_run_id)}">🔗 ${esc(r.model_a || "-")}</span>`
-        : esc(r.model_a || "-")}</td>
-      <td class="mono">${esc(r.model_b || (r.baseline_run_id ? "—" : "-"))}</td>
+      <td class="mono">${esc(r.provider_name || "—")} / ${esc(r.model || "—")}</td>
       <td style="min-width:110px"><div class="progress" style="height:6px"><div class="progress-bar" style="width:${pct}%"></div></div><span style="font-size:11px;color:var(--muted)">${r.progress.done}/${r.progress.total}</span></td>
       <td style="font-size:12px;color:var(--muted)">${esc((r.created_at || "").replace("T", " ").slice(0, 19))}</td>
       <td>${r.report_ready ? `<button class="btn sm primary" data-view="${r.run_id}">报告</button>` : ""}
@@ -374,12 +297,7 @@ $("#runs-table").addEventListener("click", async (e) => {
   const del = e.target.closest("[data-del]");
   if (del) {
     const runId = del.dataset.del;
-    let runs = [];
-    try { runs = await api("/api/runs"); } catch (_) { /* 提示信息降级为不带复用说明 */ }
-    const reusedBy = runs.filter((o) => o.baseline_run_id === runId).map((o) => o.run_id);
-    const msg = [`删除运行 ${runId}?`, "其全部产物(清单 / 记录 / 报告 / 轨迹)将被永久删除,不可恢复。"];
-    if (reusedBy.length) msg.push(`注意:运行 ${reusedBy.join("、")} 复用过它作基线;旧报告自包含不受影响,但不能再以它为复用源新建评测。`);
-    if (!confirm(msg.join("\n"))) return;
+    if (!confirm(`删除运行 ${runId}?\n其全部产物(清单 / 记录 / 报告 / 轨迹)将被永久删除,不可恢复。`)) return;
     try {
       await api(`/api/runs/${encodeURIComponent(runId)}`, "DELETE");
       toast(`已删除 ${runId}`);
@@ -391,15 +309,7 @@ $("#runs-table").addEventListener("click", async (e) => {
       }
       await refreshRuns();
       loadReportOptions();
-      { // 删除的运行可能正在可复用基线列表中;保留用户当前选择的基线
-        const sel = $("#reuse-baseline");
-        const prev = sel.value;
-        await loadBaselines();
-        if (prev && sel.querySelector(`option[value="${CSS.escape(prev)}"]`)) {
-          sel.value = prev;
-          sel.dispatchEvent(new Event("change"));
-        }
-      }
+      loadCompareOptions();
     } catch (err) { toast(`删除失败:${err.message}`, 4000); }
     return;
   }
@@ -440,11 +350,10 @@ async function pollMonitor() {
   $("#phase-badge").style.background =
     ["completed"].includes(st.status) ? "#d1fae5" : "#dbeafe";
   $("#btn-cancel").style.display =
-    ["queued", "running", "retesting", "analyzing"].includes(st.status) ? "" : "none";
+    ["queued", "running", "analyzing"].includes(st.status) ? "" : "none";
   $("#btn-view-report").style.display = st.report_ready ? "" : "none";
 
   const suite = st.suite || { instances: [] };
-  // 与后端执行顺序一致:简单 → 中等 → 困难(同带内保持套件顺序)
   const bandOrder = { easy: 0, medium: 1, hard: 2 };
   const orderedInsts = [...suite.instances]
     .sort((a, b) => (bandOrder[a.difficulty] ?? 3) - (bandOrder[b.difficulty] ?? 3));
@@ -467,9 +376,7 @@ async function pollMonitor() {
       <div class="iid">${streaming ? '<span style="color:#ef4444" title="流式输出中">●</span> ' : ""}${esc(inst.instance_id)}</div>
       <div class="meta">${esc(inst.repo)} · ${esc(inst.language_family)} · ${esc(inst.task_type)} · ${esc(inst.difficulty)}</div>
       <div class="res">
-        <span class="res-tag res-a">A</span>${chip(stat.baseline)}${runsOf("baseline")}
-        <span style="width:6px"></span>
-        <span class="res-tag res-b">B</span>${chip(stat.candidate)}${runsOf("candidate")}
+        <span class="res-tag res-a">M</span>${chip(stat.provider)}${runsOf("provider")}
       </div>
     </div>`;
   }).join("");
@@ -479,7 +386,7 @@ async function pollMonitor() {
   if (["completed", "failed", "cancelled"].includes(st.status)) {
     clearInterval(monitorTimer);
     refreshRuns();
-    if (st.status === "completed") loadReportOptions();
+    if (st.status === "completed") { loadReportOptions(); loadCompareOptions(); }
     if (st.status === "failed") toast(`运行失败:${(st.error || "").split("\n").slice(-2)[0]}`, 5000);
   }
 }
@@ -502,7 +409,6 @@ function renderLiveStats(summary) {
     ? ` · ${summary.streaming_count} 路流式输出中`
     : "";
 }
-
 
 /* ---------------- 实时输出面板 ---------------- */
 
@@ -542,17 +448,16 @@ function openLivePanel(iid) {
   $("#live-c-len").textContent = "";
   if (!entries.length) {
     $("#live-meta").innerHTML =
-      `该实例暂无实时数据:尚未执行到该题、基线为复用导入(不实跑),或服务重启导致进程内缓冲丢失。` +
+      `该实例暂无实时数据:尚未执行到该题,或服务重启导致进程内缓冲丢失。` +
       `完成的实例可在「📊 结果报告」页查看记录与失败轨迹。`;
     $("#live-body").style.display = "none";
     return;
   }
   $("#live-body").style.display = "";
-  // 多条目(A/B、S2 复测)用页签切换,默认选正在流式输出的那个
   $("#live-tabs").innerHTML = entries.map((e, i) =>
     `<button class="btn sm${i === pickLiveEntry(entries) ? " primary" : ""}"
        data-role="${esc(e.provider_role)}" data-run="${e.run_index}">
-       ${e.provider_role === "baseline" ? "A" : "B"}·r${e.run_index}${e.status === "streaming" ? " ●" : ""}</button>`).join("");
+       ${esc(e.model)} · r${e.run_index}${e.status === "streaming" ? " ●" : ""}</button>`).join("");
   $("#live-tabs").querySelectorAll("button").forEach((btn) =>
     btn.addEventListener("click", () => switchLiveTab(iid, btn.dataset.role, +btn.dataset.run)));
   const first = entries[pickLiveEntry(entries)];
@@ -587,7 +492,7 @@ async function updateLivePanel(immediate = false) {
   }
   const finished = meta.status === "done"
     && meta.reasoning_chars <= rOffset && meta.content_chars <= cOffset;
-  if (finished && liveSel.finalized && !immediate) return;   // 已取完且结束,跳过本轮
+  if (finished && liveSel.finalized && !immediate) return;
   let d;
   try {
     d = await api(`/api/runs/${selectedRunId}/live-detail`
@@ -610,7 +515,7 @@ async function updateLivePanel(immediate = false) {
   const liveCost = `$${Number(d.cost_usd || 0).toFixed(6)}`;
 
   $("#live-meta").innerHTML =
-    `<b>${esc(d.model)}</b> · ${role === "baseline" ? "A(基线)" : "B(候选)"} · ${esc(d.phase)} · run ${runIndex}` +
+    `<b>${esc(d.model)}</b> · Provider · ${esc(d.phase)} · run ${runIndex}` +
     (d.status === "streaming"
       ? ' · <span style="color:#2563eb">● 流式输出中…</span>'
       : ` · 已结束 finish=${esc(d.finish_reason || "—")}`)
@@ -629,7 +534,6 @@ $("#btn-view-report").addEventListener("click", () => gotoTab("report", selected
 
 /* ---------------- SVG 图表工具 ---------------- */
 function svgGroupedBar(labels, series, opts = {}) {
-  // series: [{name, values, color}]
   const W = 460, H = 240, padL = 40, padB = 40, padT = 24;
   const maxV = Math.max(1, ...series.flatMap((s) => s.values));
   const gw = (W - padL - 20) / labels.length;
@@ -661,8 +565,8 @@ function svgGroupedBar(labels, series, opts = {}) {
 function svgMatrix(m) {
   const cells = [
     { label: "双端通过", v: m.both_pass, sub: "Both PASS", color: "#d1fae5", tc: "#065f46" },
-    { label: "仅 Baseline", v: m.baseline_only, sub: "n10 · 回退信号", color: "#fee2e2", tc: "#991b1b" },
-    { label: "仅 Candidate", v: m.candidate_only, sub: "n01 · 改善信号", color: "#fef3c7", tc: "#92400e" },
+    { label: "仅 A 通过", v: m.a_only, sub: "Run A 领先", color: "#fee2e2", tc: "#991b1b" },
+    { label: "仅 B 通过", v: m.b_only, sub: "Run B 领先", color: "#fef3c7", tc: "#92400e" },
     { label: "双端失败", v: m.both_fail, sub: "Both FAIL", color: "#f1f5f9", tc: "#64748b" },
   ];
   return `<div class="matrix-grid">${cells.map((c) => `
@@ -708,8 +612,7 @@ function svgDonut(counts) {
   </div>`;
 }
 
-/* ---------------- 结果报告 ---------------- */
-let reportCache = null;
+/* ---------------- 结果报告(单次运行) ---------------- */
 let lastRenderedReport = null;
 let userPickedReport = null;
 
@@ -717,7 +620,7 @@ async function loadReportOptions() {
   const runs = await api("/api/runs");
   const done = runs.filter((r) => r.report_ready);
   $("#report-select").innerHTML = done.length
-    ? done.map((r) => `<option value="${r.run_id}">${r.run_id} · ${r.suite_level} · ${r.baseline_run_id ? "🔗 " : ""}${esc(r.model_a)}${r.model_b ? " vs " + esc(r.model_b) : ""}</option>`).join("")
+    ? done.map((r) => `<option value="${r.run_id}">${r.run_id} · ${r.suite_level} · ${esc(r.provider_name || "—")} / ${esc(r.model || "—")}</option>`).join("")
     : `<option value="">(暂无已完成运行)</option>`;
   if (done.length) {
     const target = (userPickedReport && done.some((r) => r.run_id === userPickedReport))
@@ -747,14 +650,9 @@ async function renderReport(runId) {
 }
 
 function renderReportDom(rep) {
-  reportCache = rep;
-  const ab = rep.mode === "A/B";
-  const p = rep.providers;
-  const s = rep.summary;
-  const cs = rep.cost_speed;
-  const dec = rep.decision;
-
-  const decColor = { GREEN: "#d1fae5", YELLOW: "#fef3c7", RED: "#fee2e2" }[dec.level] || "#f1f5f9";
+  const p = rep.providers?.provider || {};
+  const s = rep.summary || {};
+  const cs = rep.cost_speed?.provider || {};
 
   const head = `
   <div class="card">
@@ -764,72 +662,47 @@ function renderReportDom(rep) {
         <div style="color:var(--muted);font-size:12.5px;margin-top:6px">
           套件 <b>${esc(rep.suite.suite_version)}</b>(${esc(rep.suite.level)},${s.n_instances} 题)
           · 模式 <b>${esc(rep.mode)}</b><br>
-          <span class="badge a">A · ${esc(p.baseline.name)} / ${esc(p.baseline.model)} @ ${esc(p.baseline.base_url)}</span>
-          ${ab ? ` <span class="badge b">B · ${esc(p.candidate.name)} / ${esc(p.candidate.model)} @ ${esc(p.candidate.base_url)}</span>` : ""}
-          ${rep.baseline_reused_from ? ` <span class="badge neutral" title="基线端结果复用自该运行,未重新执行">🔗 基线复用 ${esc(rep.baseline_reused_from)}</span>` : ""}
+          <span class="badge a">${esc(p.name || "Provider")} / ${esc(p.model || "—")} @ ${esc(p.base_url || "—")}</span>
         </div>
       </div>
-      ${ab ? `<div style="text-align:center">
-        <div class="decision-badge" style="background:${decColor}">${dec.level}</div>
-        <div style="font-size:11.5px;color:var(--muted);margin-top:6px;max-width:260px">${esc(dec.reasons.join(";"))}</div>
-      </div>` : ""}
     </div>
     <div class="stat-cards">
-      <div class="stat-card"><div class="k">Resolved · Baseline</div><div class="v" style="color:var(--c-a)">${s.resolved_a} <small style="font-size:12px">/ ${s.n_instances}</small></div><div class="s">${pct(s.resolved_a, s.n_instances)}</div></div>
-      ${ab ? `<div class="stat-card"><div class="k">Resolved · Candidate</div><div class="v" style="color:var(--c-b)">${s.resolved_b} <small style="font-size:12px">/ ${s.n_instances}</small></div><div class="s">${pct(s.resolved_b, s.n_instances)}</div></div>` : ""}
-      ${ab ? `<div class="stat-card"><div class="k">Disagreement Rate</div><div class="v">${(rep.stats.disagreement_rate * 100).toFixed(1)}%</div><div class="s">paired_delta ${rep.stats.paired_delta} · McNemar p=${rep.stats.mcnemar_p}</div></div>` : ""}
-      ${ab ? `<div class="stat-card"><div class="k">稳定 baseline-only</div><div class="v">${rep.stable_baseline_only.length}</div><div class="s">复测后仍同方向</div></div>` : ""}
-      <div class="stat-card"><div class="k">Cost / Solved · A</div><div class="v">${cs.baseline.cost_per_solved != null ? "$" + cs.baseline.cost_per_solved : "—"}</div><div class="s">总 $${cs.baseline.total_cost_usd}</div></div>
-      ${ab ? `<div class="stat-card"><div class="k">Cost / Solved · B</div><div class="v">${cs.candidate.cost_per_solved != null ? "$" + cs.candidate.cost_per_solved : "—"}</div><div class="s">总 $${cs.candidate.total_cost_usd}</div></div>` : ""}
-      <div class="stat-card"><div class="k">输出截断 · A</div><div class="v" style="${cs.baseline.truncated_runs ? "color:var(--red)" : ""}">${cs.baseline.truncated_runs}</div><div class="s">finish=length 次数</div></div>
-      ${ab ? `<div class="stat-card"><div class="k">输出截断 · B</div><div class="v" style="${cs.candidate.truncated_runs ? "color:var(--red)" : ""}">${cs.candidate.truncated_runs}</div><div class="s">finish=length 次数</div></div>` : ""}
+      <div class="stat-card"><div class="k">Resolved</div><div class="v" style="color:var(--c-a)">${s.resolved} <small style="font-size:12px">/ ${s.n_instances}</small></div><div class="s">${pct(s.resolved, s.n_instances)}</div></div>
+      <div class="stat-card"><div class="k">Cost / Solved</div><div class="v">${cs.cost_per_solved != null ? "$" + cs.cost_per_solved : "—"}</div><div class="s">总 $${cs.total_cost_usd ?? 0}</div></div>
+      <div class="stat-card"><div class="k">输出截断</div><div class="v" style="${cs.truncated_runs ? "color:var(--red)" : ""}">${cs.truncated_runs || 0}</div><div class="s">finish=length 次数</div></div>
+      <div class="stat-card"><div class="k">API 错误</div><div class="v">${cs.errors || 0}</div><div class="s">非模型失败次数</div></div>
     </div>
   </div>`;
 
   const bandLabels = rep.per_band.map((b) => ({ easy: "Easy", medium: "Medium", hard: "Hard" }[b.difficulty] || b.difficulty));
   const resolvedChart = svgGroupedBar(
     [...bandLabels, "全部"],
-    [
-      { name: "Baseline", color: "var(--c-a)", values: [...rep.per_band.map((b) => b.baseline), s.resolved_a] },
-      ...(ab ? [{ name: "Candidate", color: "var(--c-b)", values: [...rep.per_band.map((b) => b.candidate), s.resolved_b] }] : []),
-    ]);
-
-  const disChart = ab ? svgGroupedBar(
-    bandLabels,
-    [{ name: "分歧题数", color: "#ef4444", values: rep.per_band.map((b) => b.disagree) }]) : "";
-
-  const matrixHtml = ab ? svgMatrix(rep.matrix) : `<div class="empty">单端评测无成对矩阵</div>`;
+    [{ name: "Resolved", color: "var(--c-a)", values: [...rep.per_band.map((b) => b.resolved), s.resolved] }]);
 
   const speedItems = [
-    { label: "A · 平均 TTFT", value: cs.baseline.avg_ttft_s || 0, color: "var(--c-a)" },
-    ...(ab ? [{ label: "B · 平均 TTFT", value: cs.candidate.avg_ttft_s || 0, color: "var(--c-b)" }] : []),
-    { label: "A · 平均 Wall (s)", value: cs.baseline.avg_wall_s || 0, color: "#93c5fd" },
-    ...(ab ? [{ label: "B · 平均 Wall (s)", value: cs.candidate.avg_wall_s || 0, color: "#fcd34d" }] : []),
+    { label: "平均 TTFT", value: cs.avg_ttft_s || 0, color: "var(--c-a)" },
+    { label: "平均 Wall (s)", value: cs.avg_wall_s || 0, color: "#93c5fd" },
+    { label: "平均 decode", value: cs.avg_decode_tps || 0, color: "#fcd34d" },
   ];
   const tokenItems = [
-    { label: "A · 输入 tokens", value: cs.baseline.total_prompt_tokens, color: "var(--c-a)" },
-    { label: "A · 输出 tokens", value: cs.baseline.total_completion_tokens, color: "#93c5fd" },
-    ...(ab ? [
-      { label: "B · 输入 tokens", value: cs.candidate.total_prompt_tokens, color: "var(--c-b)" },
-      { label: "B · 输出 tokens", value: cs.candidate.total_completion_tokens, color: "#fcd34d" }] : []),
+    { label: "输入 tokens", value: cs.total_prompt_tokens, color: "var(--c-a)" },
+    { label: "输出 tokens", value: cs.total_completion_tokens, color: "#93c5fd" },
+    { label: "缓存 tokens", value: cs.total_cached_tokens, color: "#fcd34d" },
   ];
   const fmtTok = (v) => v.toLocaleString();
 
   const charts = `
   <div class="chart-row">
-    <div class="card"><div class="chart-title">分难度 Resolved 对比</div>${resolvedChart}</div>
-    <div class="card"><div class="chart-title">成对结果矩阵(majority)</div>${matrixHtml}</div>
-  </div>
-  ${ab ? `<div class="chart-row">
-    <div class="card"><div class="chart-title">分难度分歧分布</div>${disChart}</div>
+    <div class="card"><div class="chart-title">分难度 Resolved</div>${resolvedChart}</div>
     <div class="card"><div class="chart-title">速度指标</div>${svgHBars(speedItems, " s")}</div>
-  </div>` : `<div class="chart-row"><div class="card"><div class="chart-title">速度指标</div>${svgHBars(speedItems, " s")}</div><div class="card"></div></div>`}
+  </div>
   <div class="chart-row">
     <div class="card"><div class="chart-title">Token 用量</div>${svgHBars(tokenItems, "", fmtTok)}</div>
-    <div class="card"><div class="chart-title">解码吞吐 (tok/s)</div>${svgHBars([
-      { label: "A · decode", value: cs.baseline.avg_decode_tps || 0, color: "var(--c-a)" },
-      ...(ab ? [{ label: "B · decode", value: cs.candidate.avg_decode_tps || 0, color: "var(--c-b)" }] : []),
-    ])}</div>
+    <div class="card"><div class="chart-title">成本与吞吐</div>${svgHBars([
+      { label: "总成本", value: cs.total_cost_usd || 0, color: "#ef4444" },
+      { label: "Cost / Solved", value: cs.cost_per_solved || 0, color: "#f59e0b" },
+      { label: "平均 decode", value: cs.avg_decode_tps || 0, color: "#10b981" },
+    ], "", (v) => typeof v === "number" ? v.toFixed(4) : v)}</div>
   </div>`;
 
   const taskRows = rep.per_task.map((t, idx) => {
@@ -843,43 +716,25 @@ function renderReportDom(rep) {
       <td>${esc(t.repo)}</td>
       <td>${esc(t.language_family)}</td>
       <td>${esc(t.task_type)}</td>
-      <td>${mark(t.baseline)}</td>
-      ${ab ? `<td>${mark(t.candidate)}</td>` : ""}
-      ${ab ? `<td>${t.stable ? `<span class="badge fail">稳定分歧</span>` : t.runs_a.length > 1 ? `<span class="badge neutral">复测一致</span>` : "—"}</td>` : ""}
-      <td class="mono">${t.runs_a.split("").map(runTag).join("")}</td>
-      ${ab ? `<td class="mono">${t.runs_b ? t.runs_b.split("").map(runTag).join("") : "—"}</td>` : ""}
-      <td class="mono">${t.wall_a ?? "—"}s</td>
-      ${ab ? `<td class="mono">${t.wall_b ?? "—"}s</td>` : ""}
-      <td class="mono">${t.turns_a ?? "—"}</td>
-      ${ab ? `<td class="mono">${t.turns_b ?? "—"}</td>` : ""}
+      <td>${mark(t.resolved)}</td>
+      <td class="mono">${t.runs || "—"}</td>
+      <td class="mono">${t.wall_s ?? "—"}s</td>
+      <td class="mono">${t.turns ?? "—"}</td>
+      <td class="mono">${t.cost != null ? "$" + t.cost : "—"}</td>
     </tr>
     <tr class="detail-row" id="detail-${idx}" style="display:none">
-      <td colspan="${ab ? 14 : 10}"><div class="task-detail" data-loaded="0" data-iid="${esc(t.instance_id)}">点击展开加载明细…</div></td>
+      <td colspan="10"><div class="task-detail" data-loaded="0" data-iid="${esc(t.instance_id)}">点击展开加载明细…</div></td>
     </tr>`;
   }).join("");
 
-  const stableHtml = ab ? `
-  <div class="card">
-    <div class="chart-title">稳定分歧任务(S5 深挖建议)</div>
-    ${rep.stable_baseline_only.length || rep.stable_candidate_only.length ? `
-      <div style="font-size:13px">
-      ${rep.stable_baseline_only.length ? `<div style="margin-bottom:6px"><b style="color:var(--red)">仅 Baseline 通过(候选端回退):</b><br>${rep.stable_baseline_only.map((i) => `<span class="mono" style="margin-right:12px">${esc(i)}</span>`).join("")}</div>` : ""}
-      ${rep.stable_candidate_only.length ? `<div><b style="color:var(--green)">仅 Candidate 通过(基线端落后):</b><br>${rep.stable_candidate_only.map((i) => `<span class="mono" style="margin-right:12px">${esc(i)}</span>`).join("")}</div>` : ""}
-      </div>` : `<div class="empty">无稳定方向性分歧</div>`}
-    <div style="margin-top:10px;font-size:12.5px;color:var(--muted)">💡 ${esc(dec.advice)}</div>
-  </div>` : "";
-
-  $("#report-body").innerHTML = head + charts + stableHtml + `
+  $("#report-body").innerHTML = head + charts + `
   <div class="card">
     <div class="card-head"><h3>每任务明细(点击行展开轨迹)</h3></div>
     <div class="table-scroll">
     <table class="table">
       <thead><tr>
         <th>Task</th><th>难度</th><th>仓库</th><th>语言</th><th>类型</th>
-        <th>Baseline</th>${ab ? "<th>Candidate</th><th>稳定?</th>" : ""}
-        <th>Runs A</th>${ab ? "<th>Runs B</th>" : ""}
-        <th>Wall A</th>${ab ? "<th>Wall B</th>" : ""}
-        <th>Turns A</th>${ab ? "<th>Turns B</th>" : ""}
+        <th>Result</th><th>Runs</th><th>Wall</th><th>Turns</th><th>Cost</th>
       </tr></thead>
       <tbody>${taskRows}</tbody>
     </table></div>
@@ -911,10 +766,10 @@ async function toggleTaskDetail(tr, rep) {
   const trajs = (rep.artifacts || []).filter((n) => n.startsWith(safe + "__"));
   const t = rep.per_task[idx];
   let html = `<div style="font-size:12.5px;line-height:1.9">
-    <b>难度分数</b> D_struct=${t.d_struct} · <b>成本</b> A=$${t.cost_a}${t.cost_b != null ? ` B=$${t.cost_b}` : ""}
-    · <b>用时</b> A=${t.wall_a}s${t.wall_b != null ? ` B=${t.wall_b}s` : ""}</div>`;
+    <b>难度分数</b> D_struct=${t.d_struct} · <b>成本</b> $${t.cost ?? "—"}
+    · <b>用时</b> ${t.wall_s ?? "—"}s · <b>轮次</b> ${t.turns ?? "—"}</div>`;
   if (!trajs.length) {
-    html += `<div class="empty" style="padding:12px 0">该任务无失败轨迹(双端通过,按存储策略不保存)</div>`;
+    html += `<div class="empty" style="padding:12px 0">该任务无失败轨迹(通过任务按存储策略不保存)</div>`;
   } else {
     html += `<div style="margin-top:8px"><b style="font-size:12.5px">失败轨迹(${trajs.length})</b>
       ${trajs.map((n) => `<div style="margin-top:8px">
@@ -965,28 +820,168 @@ async function toggleTaskDetail(tr, rep) {
   }));
 }
 
+/* ---------------- 运行后对比 ---------------- */
+let compareRunsCache = [];
+let compareRendered = null;
+
+async function loadCompareOptions() {
+  try {
+    const runs = await api("/api/runs");
+    compareRunsCache = runs.filter((r) => r.report_ready);
+    const opts = (sel) => {
+      const cur = sel.value;
+      sel.innerHTML = compareRunsCache.length
+        ? compareRunsCache.map((r) => `<option value="${r.run_id}">${r.run_id} · ${r.suite_level} · ${esc(r.provider_name || "—")} / ${esc(r.model || "—")}</option>`).join("")
+        : `<option value="">(暂无已完成运行)</option>`;
+      if (compareRunsCache.some((r) => r.run_id === cur)) sel.value = cur;
+      else if (compareRunsCache.length) sel.value = compareRunsCache[0].run_id;
+    };
+    opts($("#compare-a"));
+    opts($("#compare-b"));
+    if (compareRunsCache.length > 1 && $("#compare-b").value === $("#compare-a").value) {
+      $("#compare-b").value = compareRunsCache[1].run_id;
+    }
+    if (compareRendered) renderCompare();
+  } catch (_) { /* ignore */ }
+}
+
+$("#btn-compare").addEventListener("click", renderCompare);
+
+async function renderCompare() {
+  const runA = $("#compare-a").value;
+  const runB = $("#compare-b").value;
+  if (!runA || !runB) {
+    toast("请选择两次已完成运行");
+    return;
+  }
+  if (runA === runB) {
+    toast("请选择两个不同的运行");
+    return;
+  }
+  $("#compare-body").innerHTML = `<div class="empty">对比中…</div>`;
+  try {
+    const c = await api("/api/compare", "POST", { run_a: runA, run_b: runB });
+    compareRendered = c;
+    renderCompareDom(c);
+  } catch (err) {
+    $("#compare-body").innerHTML = `<div class="warn-box">${esc(err.message)}</div>`;
+  }
+}
+
+function providerLabel(r) {
+  const p = r.providers?.provider || {};
+  return `${p.name || "Provider"} / ${p.model || "—"}`;
+}
+
+function renderCompareDom(c) {
+  const sA = c.run_a.summary || {};
+  const sB = c.run_b.summary || {};
+  const csA = c.run_a.cost_speed?.provider || {};
+  const csB = c.run_b.cost_speed?.provider || {};
+  const pa = providerLabel(c.run_a);
+  const pb = providerLabel(c.run_b);
+  const m = c.matrix;
+  const n = sA.n_instances || sB.n_instances || 1;
+
+  const head = `
+  <div class="card">
+    <div class="rep-head">
+      <div>
+        <h2 style="font-size:18px">运行后对比</h2>
+        <div style="color:var(--muted);font-size:12.5px;margin-top:6px">
+          套件 <b>${esc(c.suite.suite_version)}</b>(${esc(c.suite.level)},${n} 题)
+          · 两次运行相互独立,不涉及双端复测
+        </div>
+      </div>
+    </div>
+    <div class="stat-cards">
+      <div class="stat-card"><div class="k">Resolved · A</div><div class="v" style="color:var(--c-a)">${sA.resolved ?? 0} <small style="font-size:12px">/ ${sA.n_instances ?? 0}</small></div><div class="s">${pct(sA.resolved, sA.n_instances)}</div></div>
+      <div class="stat-card"><div class="k">Resolved · B</div><div class="v" style="color:var(--c-b)">${sB.resolved ?? 0} <small style="font-size:12px">/ ${sB.n_instances ?? 0}</small></div><div class="s">${pct(sB.resolved, sB.n_instances)}</div></div>
+      <div class="stat-card"><div class="k">A 领先 / B 领先</div><div class="v">${m.a_only} / ${m.b_only}</div><div class="s">双过 ${m.both_pass} · 双败 ${m.both_fail} · 错误 ${m.errors}</div></div>
+      <div class="stat-card"><div class="k">Cost / Solved · A</div><div class="v">${csA.cost_per_solved != null ? "$" + csA.cost_per_solved : "—"}</div><div class="s">总 $${csA.total_cost_usd ?? 0}</div></div>
+      <div class="stat-card"><div class="k">Cost / Solved · B</div><div class="v">${csB.cost_per_solved != null ? "$" + csB.cost_per_solved : "—"}</div><div class="s">总 $${csB.total_cost_usd ?? 0}</div></div>
+    </div>
+  </div>`;
+
+  const bandLabels = c.per_band.map((b) => ({ easy: "Easy", medium: "Medium", hard: "Hard" }[b.difficulty] || b.difficulty));
+  const bandChart = svgGroupedBar(
+    [...bandLabels, "全部"],
+    [
+      { name: "A", color: "var(--c-a)", values: [...c.per_band.map((b) => b.a_resolved), sA.resolved] },
+      { name: "B", color: "var(--c-b)", values: [...c.per_band.map((b) => b.b_resolved), sB.resolved] },
+    ]);
+
+  const charts = `
+  <div class="chart-row">
+    <div class="card"><div class="chart-title">分难度 Resolved 对比</div>${bandChart}</div>
+    <div class="card"><div class="chart-title">成对结果矩阵(独立运行后统计)</div>${svgMatrix(m)}</div>
+  </div>`;
+
+  const taskRows = c.per_task.map((t) => {
+    const mark = (v) => v === "pass" ? `<span class="badge pass">PASS</span>` : v === "fail" ? `<span class="badge fail">FAIL</span>` : v === "error" ? `<span class="badge err">ERR</span>` : `<span class="badge neutral">—</span>`;
+    return `<tr>
+      <td><span class="mono">${esc(t.instance_id)}</span></td>
+      <td><span class="badge neutral">${esc(t.difficulty)}</span></td>
+      <td>${esc(t.repo)}</td>
+      <td>${esc(t.language_family)}</td>
+      <td>${esc(t.task_type)}</td>
+      <td>${mark(t.status_a)}</td>
+      <td>${mark(t.status_b)}</td>
+      <td class="mono">${t.cost_a != null ? "$" + t.cost_a : "—"}</td>
+      <td class="mono">${t.cost_b != null ? "$" + t.cost_b : "—"}</td>
+      <td class="mono">${t.wall_a ?? "—"}s</td>
+      <td class="mono">${t.wall_b ?? "—"}s</td>
+      <td class="mono">${t.turns_a ?? "—"}</td>
+      <td class="mono">${t.turns_b ?? "—"}</td>
+    </tr>`;
+  }).join("");
+
+  $("#compare-body").innerHTML = head + charts + `
+  <div class="card">
+    <div class="card-head"><h3>每任务对比</h3></div>
+    <div class="table-scroll">
+    <table class="table">
+      <thead><tr>
+        <th>Task</th><th>难度</th><th>仓库</th><th>语言</th><th>类型</th>
+        <th>A</th><th>B</th>
+        <th>Cost A</th><th>Cost B</th><th>Wall A</th><th>Wall B</th><th>Turns A</th><th>Turns B</th>
+      </tr></thead>
+      <tbody>${taskRows}</tbody>
+    </table></div>
+  </div>
+  <div style="font-size:12.5px;color:var(--muted);margin-top:8px">
+    对比仅基于两次独立运行的报告，不包含分歧复测或自动 GREEN/YELLOW/RED 决策。
+  </div>`;
+}
+
 /* ---------------- 实例与套件 ---------------- */
 let poolMeta = null;
 
 async function loadPool() {
-  poolMeta = await api("/api/meta");
-  const m = poolMeta;
-  $("#pool-stats").innerHTML = `
-    <div class="stat-tile"><div class="v">${m.instance_count}</div><div class="k">候选实例(冻结 revision:${esc(m.dataset_meta.version || "-")})</div></div>
-    <div class="stat-tile"><div class="v">${Object.keys(m.by_language).length}</div><div class="k">语言 · ${Object.entries(m.by_language).map(([k, v]) => `${k}:${v}`).join(" ")}</div></div>
-    <div class="stat-tile"><div class="v">${Object.keys(m.by_repo).length}</div><div class="k">仓库</div></div>
-    <div class="stat-tile"><div class="v">${m.by_difficulty.easy}/${m.by_difficulty.medium}/${m.by_difficulty.hard}</div><div class="k">Easy / Medium / Hard</div></div>`;
-  const fill = (id, options) => {
-    const sel = $(id);
-    const cur = sel.value;
-    sel.innerHTML = `<option value="">${sel.options[0]?.text || "全部"}</option>` +
-      options.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join("");
-    sel.value = cur;
-  };
-  fill("#f-lang", Object.keys(m.by_language).map((k) => [k, k]));
-  fill("#f-type", Object.keys(m.by_task_type).map((k) => [k, k]));
-  fill("#f-band", ["easy", "medium", "hard"].map((k) => [k, k]));
-  renderPoolTable();
+  try {
+    poolMeta = await api("/api/meta");
+    const m = poolMeta;
+    $("#pool-stats").innerHTML = `
+      <div class="stat-tile"><div class="v">${m.instance_count}</div><div class="k">候选实例(冻结 revision:${esc(m.dataset_meta.version || "-")})</div></div>
+      <div class="stat-tile"><div class="v">${Object.keys(m.by_language).length}</div><div class="k">语言 · ${Object.entries(m.by_language).map(([k, v]) => `${k}:${v}`).join(" ")}</div></div>
+      <div class="stat-tile"><div class="v">${Object.keys(m.by_repo).length}</div><div class="k">仓库</div></div>
+      <div class="stat-tile"><div class="v">${m.by_difficulty.easy}/${m.by_difficulty.medium}/${m.by_difficulty.hard}</div><div class="k">Easy / Medium / Hard</div></div>`;
+    const fill = (id, options) => {
+      const sel = $(id);
+      const cur = sel.value;
+      sel.innerHTML = `<option value="">${sel.options[0]?.text || "全部"}</option>` +
+        options.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join("");
+      sel.value = cur;
+    };
+    fill("#f-lang", Object.keys(m.by_language).map((k) => [k, k]));
+    fill("#f-type", Object.keys(m.by_task_type).map((k) => [k, k]));
+    fill("#f-band", ["easy", "medium", "hard"].map((k) => [k, k]));
+    renderPoolTable();
+  } catch (err) {
+    poolMeta = null;
+    $("#pool-stats").innerHTML = `<div class="warn-box">无法加载官方数据集实例池：${esc(err.message || err)}</div>`;
+    $("#pool-table tbody").innerHTML = `<tr><td colspan="12" class="empty">预置套件实例数据加载失败</td></tr>`;
+  }
   loadSuites();
 }
 
@@ -1022,27 +1017,21 @@ $("#f-q").addEventListener("input", () => {
 
 async function loadSuites() {
   const suites = await api("/api/suites");
+  suitesCache = suites;
   $("#suites-table tbody").innerHTML = suites.map((s) => `<tr>
     <td class="mono">${esc(s.suite_id)}</td>
     <td>${esc(s.level)}</td><td>${s.instance_count}</td>
     <td style="font-size:12px;color:var(--muted)">${esc((s.created_at || "").replace("T", " ").slice(0, 19))}</td>
-    <td><button class="btn sm" data-suite="${esc(s.suite_id)}">查看</button></td>
+    <td style="white-space:nowrap">
+      <button class="btn sm" data-suite="${esc(s.suite_id)}">查看</button>
+      <button class="btn sm primary" data-run-suite="${esc(s.suite_id)}">运行</button>
+    </td>
   </tr>`).join("") || `<tr><td colspan="5" class="empty">暂无套件</td></tr>`;
   $$("#suites-table [data-suite]").forEach((b) =>
     b.addEventListener("click", () => showSuite(b.dataset.suite)));
+  $$("#suites-table [data-run-suite]").forEach((b) =>
+    b.addEventListener("click", () => quickRunSuite(b.dataset.runSuite)));
 }
-
-$("#btn-gen-suite").addEventListener("click", async () => {
-  try {
-    const m = await api("/api/suites", "POST", {
-      level: $("#gen-level").value,
-      seed: parseInt($("#gen-seed").value) || 20260816,
-    });
-    toast(`已生成 ${m.suite_id}(${m.instances.length} 题)`);
-    loadSuites();
-    showSuite(m.suite_id);
-  } catch (err) { toast(err.message); }
-});
 
 async function showSuite(suiteId) {
   const m = await api(`/api/suites/${suiteId}`);
@@ -1063,8 +1052,52 @@ async function showSuite(suiteId) {
     </details>`;
 }
 
+async function quickRunSuite(suiteId) {
+  const suite = suitesCache.find((s) => s.suite_id === suiteId);
+  const pa = readProvider("provider");
+  if (!pa.base_url || !pa.model) {
+    selectSuiteInForm(suiteId);
+    toast("请先填写 Provider 配置后再运行", 4200);
+    return;
+  }
+
+  const label = suite ? `${suite.suite_id}(${suite.level}, ${suite.instance_count}题)` : suiteId;
+  if (!confirm(`使用当前 Provider 配置运行套件 ${label}？`)) return;
+
+  const body = buildRunBody();
+  body.suite_id = suiteId;
+  body.dataset_source = "official";
+  body.docker_enabled = true;
+  body.evaluator = "official";
+
+  const btn = $("#btn-start");
+  const prevDisabled = btn.disabled;
+  btn.disabled = true;
+  try {
+    await startRun(body);
+  } catch (err) {
+    toast(`启动失败:${err.message}`, 4200);
+  } finally {
+    btn.disabled = prevDisabled;
+  }
+}
+
+function selectSuiteInForm(suiteId) {
+  SELECTED_SUITE_ID = suiteId;
+  gotoTab("run");
+  const s = suitesCache.find((x) => x.suite_id === suiteId);
+  if (s) {
+    SEGMENTS["suite-level"] = s.level;
+    $$("#suite-level button").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.v === s.level);
+    });
+  }
+  toast(`已选择套件 ${suiteId}，请确认 Provider 配置后点击启动`, 3600);
+}
+
 /* ---------------- 初始化 ---------------- */
 refreshRuns();
 loadReportOptions();
+loadCompareOptions();
 loadPool();
 refreshProfiles();

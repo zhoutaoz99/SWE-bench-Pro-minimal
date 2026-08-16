@@ -9,7 +9,6 @@ export type SuiteLevel = 'smoke6' | 'core12' | 'confirm24';
 export type RunStatus =
   | 'queued'
   | 'running'
-  | 'retesting'
   | 'analyzing'
   | 'completed'
   | 'failed'
@@ -74,7 +73,7 @@ export interface ProviderConfig {
   base_url: string;
   model: string;
   api_key: string;
-  role: 'baseline' | 'candidate';
+  role: 'provider';
   temperature: number;
   top_p: number;
   max_tokens: number;
@@ -91,7 +90,7 @@ export const providerConfigSchema = z.object({
   base_url: z.string().default(''),
   model: z.string().default(''),
   api_key: z.string().default(''),
-  role: z.enum(['baseline', 'candidate']).default('baseline'),
+  role: z.literal('provider').default('provider'),
   temperature: z.number().default(1.0),
   top_p: z.number().default(0.95),
   max_tokens: z.number().int().default(32768),
@@ -120,6 +119,11 @@ export interface Instance {
   gold_loc_changed: number;
   base_commit: string;
   docker_image: string;
+  gold_patch: string;
+  test_patch: string;
+  install: string;
+  test_cmd: string;
+  repo_directory: string;
   p_hist: number | null;
   runtime_class: string;
 }
@@ -140,6 +144,11 @@ export function toInstance(d: Record<string, unknown>): Instance {
     gold_loc_changed: Number(d.gold_loc_changed ?? 0),
     base_commit: String(d.base_commit ?? ''),
     docker_image: String(d.docker_image ?? ''),
+    gold_patch: String(d.gold_patch ?? ''),
+    test_patch: String(d.test_patch ?? ''),
+    install: String(d.install ?? ''),
+    test_cmd: String(d.test_cmd ?? ''),
+    repo_directory: String(d.repo_directory ?? ''),
     p_hist: d.p_hist == null ? null : Number(d.p_hist),
     runtime_class: String(d.runtime_class ?? 'medium'),
   };
@@ -177,28 +186,31 @@ export const suiteManifestSchema = z.object({
 
 // ---------- Run Request ----------
 
+export type DatasetSource = 'official';
+export type EvaluatorKind = 'official';
+
 export interface RunRequest {
-  provider_a: ProviderConfig | null;
-  provider_b: ProviderConfig | null;
-  baseline_run_id: string | null;
+  provider: ProviderConfig | null;
   suite_level: SuiteLevel;
   suite_seed: number;
   suite_id: string | null;
-  repeat_disagreements: number;
-  scaffold: 'agent' | 'single-turn';
+  scaffold: 'agent';
   turn_limit: number;
+  dataset_source: DatasetSource;
+  docker_enabled: boolean;
+  evaluator: EvaluatorKind;
 }
 
 export const runRequestSchema = z.object({
-  provider_a: providerConfigSchema.nullable().optional().default(null),
-  provider_b: providerConfigSchema.nullable().optional().default(null),
-  baseline_run_id: z.string().nullable().optional().default(null),
+  provider: providerConfigSchema.nullable().optional().default(null),
   suite_level: z.enum(['smoke6', 'core12', 'confirm24']).default('smoke6'),
   suite_seed: z.number().int().default(20260816),
   suite_id: z.string().nullable().optional().default(null),
-  repeat_disagreements: z.number().int().default(2),
-  scaffold: z.enum(['agent', 'single-turn']).default('agent'),
-  turn_limit: z.number().int().default(200),
+  scaffold: z.enum(['agent']).default('agent'),
+  turn_limit: z.number().int().default(50),
+  dataset_source: z.enum(['official']).default('official'),
+  docker_enabled: z.literal(true).default(true),
+  evaluator: z.enum(['official']).default('official'),
 });
 
 // ---------- Usage / Run Record ----------
@@ -211,7 +223,7 @@ export interface UsageInfo {
 
 export interface RunRecord {
   run_index: number;
-  phase: 'S1' | 'S2';
+  phase: 'main';
   instance_id: string;
   provider_role: string;
   provider_name: string;
@@ -244,6 +256,7 @@ export interface RunRecord {
 export const generateSuiteBodySchema = z.object({
   level: z.enum(['smoke6', 'core12', 'confirm24']).default('smoke6'),
   seed: z.number().int().default(20260816),
+  dataset_source: z.enum(['official']).default('official'),
 });
 
 export const saveProfileBodySchema = z.object({
@@ -265,4 +278,9 @@ export const liveDetailQuerySchema = z.object({
   run_index: z.coerce.number().int().default(0),
   r_offset: z.coerce.number().int().default(0),
   c_offset: z.coerce.number().int().default(0),
+});
+
+export const compareBodySchema = z.object({
+  run_a: z.string().min(1),
+  run_b: z.string().min(1),
 });

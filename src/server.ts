@@ -6,13 +6,16 @@ import { RunStore } from './store';
 import { RunEngine, SECRET_VAULT } from './runner';
 import * as dataset from './dataset';
 import * as difficulty from './difficulty';
+import * as analyzer from './analyzer';
 import * as sampler from './sampler';
+import { getFixedSuite, listFixedSuites } from './sampler';
 import * as live from './live';
 import { LiveProvider } from './provider';
 import {
   RunRequest,
   SuiteManifest,
   artifactQuerySchema,
+  compareBodySchema,
   generateSuiteBodySchema,
   liveDetailQuerySchema,
   providerRoutingToRequestDict,
@@ -78,53 +81,7 @@ function parseOr422(schema: { safeParse(data: unknown): { success: boolean; data
   return result.data;
 }
 
-function resolveReusedBaseline(request: RunRequest): { suite: SuiteManifest; breq: Record<string, any> } {
-  const bstate = store.loadState(request.baseline_run_id!);
-  if (!bstate) throw new HttpError(404, `baseline run not found: ${request.baseline_run_id}`);
-  if (bstate.status !== 'completed' || !bstate.report_ready) {
-    throw new HttpError(422, `基线运行 ${request.baseline_run_id} 尚未完成,无法复用`);
-  }
-  const breq = bstate.request || {};
-  if (breq.provider_b) {
-    throw new HttpError(422, `运行 ${request.baseline_run_id} 是 A/B 双端运行,不能作为基线复用源`);
-  }
-  if (breq.baseline_run_id) {
-    throw new HttpError(422, `运行 ${request.baseline_run_id} 自身复用了基线,不含实跑基线记录`);
-  }
-  const suite = bstate.suite as SuiteManifest;
-  if (request.suite_id && request.suite_id !== suite.suite_id) {
-    throw new HttpError(
-      422,
-      `套件不一致:基线运行使用 ${suite.suite_id},本次选择了 ${request.suite_id};复用基线时必须使用同一套件`,
-    );
-  }
-  const bScaffold = breq.scaffold || 'single-turn';
-  if (bScaffold !== request.scaffold) {
-    throw new HttpError(
-      422,
-      `scaffold 不一致:基线运行是 ${bScaffold},本次是 ${request.scaffold};复用基线时两端必须用同一 scaffold 才可比(旧基线为单轮模式,请在评测设置中切换)`,
-    );
-  }
-  store.saveSuite(suite);
-  const bpa = breq.provider_a || {};
-  request.provider_a = {
-    name: bpa.name || 'Baseline',
-    base_url: bpa.base_url || '',
-    model: bpa.model || '',
-    api_key: '',
-    role: 'baseline',
-    temperature: bpa.temperature ?? 0.0,
-    top_p: bpa.top_p ?? 1.0,
-    max_tokens: bpa.max_tokens ?? 8192,
-    reasoning_effort: bpa.reasoning_effort ?? null,
-    price_input_per_m: bpa.price_input_per_m ?? 0.0,
-    price_cached_per_m: bpa.price_cached_per_m ?? 0.0,
-    price_output_per_m: bpa.price_output_per_m ?? 0.0,
-    auto_append_v1: bpa.auto_append_v1 ?? true,
-    provider: bpa.provider ?? null,
-  };
-  return { suite, breq };
-}
+
 
 function startRun(runId: string): void {
   const abort = new AbortController();
@@ -137,50 +94,58 @@ function startRun(runId: string): void {
 
 // ---------------- API ----------------
 
-app.get('/api/meta', (_req, res) => {
-  const instances = dataset.loadSeedInstances();
-  const rows = difficulty.annotate(instances);
-  const byLang: Record<string, number> = {};
-  const byType: Record<string, number> = {};
-  const byRepo: Record<string, number> = {};
-  const byBand: Record<string, number> = {};
-  for (const r of rows) {
-    byLang[String(r.language_family)] = (byLang[String(r.language_family)] ?? 0) + 1;
-    byType[String(r.task_type)] = (byType[String(r.task_type)] ?? 0) + 1;
-    byRepo[String(r.repo)] = (byRepo[String(r.repo)] ?? 0) + 1;
-    byBand[String(r.difficulty)] = (byBand[String(r.difficulty)] ?? 0) + 1;
+app.get('/api/meta', (req, res) => {
+  try {
+    const instances = dataset.loadSuiteInstances();
+    const rows = difficulty.annotate(instances);
+    const byLang: Record<string, number> = {};
+    const byType: Record<string, number> = {};
+    const byRepo: Record<string, number> = {};
+    const byBand: Record<string, number> = {};
+    for (const r of rows) {
+      byLang[String(r.language_family)] = (byLang[String(r.language_family)] ?? 0) + 1;
+      byType[String(r.task_type)] = (byType[String(r.task_type)] ?? 0) + 1;
+      byRepo[String(r.repo)] = (byRepo[String(r.repo)] ?? 0) + 1;
+      byBand[String(r.difficulty)] = (byBand[String(r.difficulty)] ?? 0) + 1;
+    }
+    res.json({
+      framework: 'SWE-bench Pro 分层最小集评测框架',
+      dataset_meta: dataset.OFFICIAL_META,
+      instance_count: rows.length,
+      by_language: byLang,
+      by_task_type: byType,
+      by_repo: byRepo,
+      by_difficulty: byBand,
+    });
+  } catch (err) {
+    handleError(err, res);
   }
-  res.json({
-    framework: 'SWE-bench Pro 分层最小集评测框架',
-    dataset_meta: dataset.SEED_META,
-    instance_count: rows.length,
-    by_language: byLang,
-    by_task_type: byType,
-    by_repo: byRepo,
-    by_difficulty: byBand,
-    suites: store.listSuites(),
-  });
 });
 
 app.get('/api/instances', (req, res) => {
-  const rows = difficulty.annotate(dataset.loadSeedInstances());
-  const language = req.query.language as string | undefined;
-  const taskType = req.query.task_type as string | undefined;
-  const difficultyBand = req.query.difficulty_band as string | undefined;
-  const repo = req.query.repo as string | undefined;
-  const q = req.query.q as string | undefined;
-  const out = rows.filter((r) => {
-    if (language && r.language_family !== language) return false;
-    if (taskType && r.task_type !== taskType) return false;
-    if (difficultyBand && r.difficulty !== difficultyBand) return false;
-    if (repo && r.repo !== repo) return false;
-    if (q) {
-      const haystack = `${r.instance_id}${r.repo}${r.knowledge_domain ?? ''}`.toLowerCase();
-      if (!haystack.includes(q.toLowerCase())) return false;
-    }
-    return true;
-  });
-  res.json(out);
+  try {
+    const instances = dataset.loadSuiteInstances();
+    const rows = difficulty.annotate(instances);
+    const language = req.query.language as string | undefined;
+    const taskType = req.query.task_type as string | undefined;
+    const difficultyBand = req.query.difficulty_band as string | undefined;
+    const repo = req.query.repo as string | undefined;
+    const q = req.query.q as string | undefined;
+    const out = rows.filter((r) => {
+      if (language && r.language_family !== language) return false;
+      if (taskType && r.task_type !== taskType) return false;
+      if (difficultyBand && r.difficulty !== difficultyBand) return false;
+      if (repo && r.repo !== repo) return false;
+      if (q) {
+        const haystack = `${r.instance_id}${r.repo}${r.knowledge_domain ?? ''}`.toLowerCase();
+        if (!haystack.includes(q.toLowerCase())) return false;
+      }
+      return true;
+    });
+    res.json(out);
+  } catch (err) {
+    handleError(err, res);
+  }
 });
 
 app.post('/api/suites', (req, res) => {
@@ -195,17 +160,19 @@ app.post('/api/suites', (req, res) => {
 });
 
 app.get('/api/suites', (_req, res) => {
-  res.json(store.listSuites());
+  res.json(listFixedSuites());
 });
 
 app.get('/api/suites/:suiteId', (req, res) => {
-  const manifest = store.loadSuite(req.params.suiteId as string);
-  if (!manifest) {
-    res.status(404).json({ detail: `suite not found: ${req.params.suiteId}` });
-    return;
+  try {
+    const suite = getFixedSuite(req.params.suiteId as string);
+    res.json(jsonable(suite));
+  } catch (err) {
+    handleError(err, res);
   }
-  res.json(jsonable(manifest));
 });
+
+
 
 app.get('/api/provider-profiles', (_req, res) => {
   res.json(store.listProfiles());
@@ -265,47 +232,33 @@ app.post('/api/test-provider', async (req, res) => {
   }
 });
 
-app.get('/api/baselines', (_req, res) => {
-  res.json(store.listBaselines());
-});
-
 app.post('/api/runs', (req, res) => {
   try {
     const request = parseOr422(runRequestSchema, req.body) as RunRequest;
-    if (request.baseline_run_id && request.provider_a) {
-      throw new HttpError(422, 'baseline_run_id 与 provider_a 只能二选一:复用基线时不必填写基线端配置');
+    if (!request.provider) {
+      throw new HttpError(422, '缺少推理端:请填写 provider 配置');
     }
-    if (!request.baseline_run_id && !request.provider_a) {
-      throw new HttpError(422, '缺少推理端:请填写 provider_a,或提供 baseline_run_id 复用已完成基线');
+    const p = request.provider;
+    if (!p.base_url.trim() || !p.model.trim()) {
+      throw new HttpError(422, 'Provider: 必须填写 base_url 与 model');
     }
-    if (request.baseline_run_id && !request.provider_b) {
-      throw new HttpError(422, '复用基线时必须提供 provider_b(候选端):本次运行只实跑候选端');
+    if (request.docker_enabled && request.dataset_source !== 'official') {
+      throw new HttpError(422, 'Docker 模式仅支持官方数据集;请先切换到“官方数据集”');
     }
-
-    let reuseSuite: SuiteManifest | null = null;
-    if (request.baseline_run_id) {
-      const resolved = resolveReusedBaseline(request);
-      reuseSuite = resolved.suite;
-      request.suite_id = reuseSuite.suite_id;
+    if (request.evaluator === 'official' && request.dataset_source !== 'official') {
+      throw new HttpError(422, 'official evaluator 需要 official 数据集;请先切换到“官方数据集”');
     }
-
-    const problems: string[] = [];
-    for (const [p, label] of [
-      [request.provider_a, 'Provider A'],
-      [request.provider_b, 'Provider B'],
-    ] as const) {
-      if (p && (!p.base_url.trim() || !p.model.trim())) {
-        problems.push(`${label}: 必须填写 base_url 与 model`);
-      }
-    }
-    if (problems.length) throw new HttpError(422, problems.join(';'));
 
     let suite: SuiteManifest;
-    if (reuseSuite) suite = reuseSuite;
-    else if (request.suite_id) {
-      const loaded = store.loadSuite(request.suite_id);
-      if (!loaded) throw new HttpError(404, `suite not found: ${request.suite_id}`);
-      suite = loaded;
+    if (request.suite_id) {
+      const fixed = listFixedSuites().some((s) => s.suite_id === request.suite_id);
+      if (fixed) {
+        suite = getFixedSuite(request.suite_id);
+      } else {
+        const loaded = store.loadSuite(request.suite_id);
+        if (!loaded) throw new HttpError(404, `suite not found: ${request.suite_id}`);
+        suite = loaded;
+      }
     } else {
       suite = sampler.generateSuite(request.suite_level, request.suite_seed);
       store.saveSuite(suite);
@@ -313,18 +266,14 @@ app.post('/api/runs', (req, res) => {
 
     const state = store.createRun(request, suite);
     const runId = state.run_id as string;
-    if (request.provider_a?.api_key) {
-      SECRET_VAULT.set(runId, { baseline: request.provider_a.api_key });
-    }
-    if (request.provider_b?.api_key) {
-      SECRET_VAULT.set(runId, { ...(SECRET_VAULT.get(runId) || {}), candidate: request.provider_b.api_key });
+    if (request.provider.api_key) {
+      SECRET_VAULT.set(runId, { provider: request.provider.api_key });
     }
     startRun(runId);
     res.json({
       run_id: runId,
       suite_id: suite.suite_id,
       status: state.status,
-      baseline_run_id: request.baseline_run_id,
     });
   } catch (err) {
     handleError(err, res);
@@ -333,6 +282,26 @@ app.post('/api/runs', (req, res) => {
 
 app.get('/api/runs', (_req, res) => {
   res.json(store.listRuns());
+});
+
+app.post('/api/compare', (req, res) => {
+  try {
+    const body = parseOr422(compareBodySchema, req.body);
+    if (body.run_a === body.run_b) {
+      throw new HttpError(422, '请选择两个不同的运行进行对比');
+    }
+    const reportA = store.loadReport(body.run_a);
+    const reportB = store.loadReport(body.run_b);
+    if (!reportA) throw new HttpError(404, `报告未找到或未完成: ${body.run_a}`);
+    if (!reportB) throw new HttpError(404, `报告未找到或未完成: ${body.run_b}`);
+    if (reportA.suite?.suite_id !== reportB.suite?.suite_id) {
+      throw new HttpError(422, '仅支持对比同一套件的两次独立运行');
+    }
+    const comparison = analyzer.buildComparison(reportA, reportB);
+    res.json(comparison);
+  } catch (err) {
+    handleError(err, res);
+  }
 });
 
 app.get('/api/runs/:runId/state', (req, res) => {

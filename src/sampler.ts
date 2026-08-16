@@ -1,7 +1,8 @@
-import crypto from 'node:crypto';
-import { loadSeedInstances, SEED_META } from './dataset';
+import fs from 'node:fs';
+import { loadSuiteInstances, OFFICIAL_META } from './dataset';
 import * as difficulty from './difficulty';
 import { Instance, SuiteLevel, SuiteManifest } from './schemas';
+import { FIXED_SUITES_PATH } from './paths';
 
 export const QUOTAS: Record<string, Record<string, number>> = {
   smoke6: { easy: 2, medium: 2, hard: 2 },
@@ -157,78 +158,104 @@ function fillQuotas(
   return relaxations;
 }
 
-export function generateSuite(level: SuiteLevel, seed?: number | null): SuiteManifest {
-  const instances = loadSeedInstances();
-  const finalSeed = seed != null ? seed : crypto.randomInt(0, 10_000);
-  const annotated = new Map(
-    difficulty.annotate(instances).map((r) => [r.instance_id as string, r]),
-  );
+export interface FixedSuiteDefinition {
+  suite_id: string;
+  name: string;
+  level: SuiteLevel;
+  description?: string;
+  instance_ids: string[];
+}
 
-  let chosen: Instance[] = [];
-  let repoCount: Record<string, number> = {};
-  let relax: string[] = [];
+export function loadFixedSuiteDefinitions(): FixedSuiteDefinition[] {
+  const raw = JSON.parse(fs.readFileSync(FIXED_SUITES_PATH, 'utf-8')) as {
+    suites?: Array<Record<string, unknown>>;
+  };
+  if (!Array.isArray(raw.suites)) {
+    throw new Error(`fixed_suites.json must contain a "suites" array`);
+  }
+  return raw.suites.map((s) => ({
+    suite_id: String(s.suite_id ?? ''),
+    name: String(s.name ?? s.suite_id ?? ''),
+    level: String(s.level ?? 'smoke6') as SuiteLevel,
+    description: s.description ? String(s.description) : '',
+    instance_ids: Array.isArray(s.instance_ids) ? s.instance_ids.map(String) : [],
+  }));
+}
 
-  if (level === 'smoke6') {
-    const selected: Instance[] = [];
-    repoCount = {};
-    relax = fillQuotas(
-      instances,
-      QUOTAS.smoke6!,
-      selected,
-      repoCount,
-      REPO_MAX.smoke6!,
-    );
-    chosen = selected;
-  } else {
-    const core: Instance[] = [];
-    repoCount = {};
-    relax = fillQuotas(
-      instances,
-      QUOTAS.core12!,
-      core,
-      repoCount,
-      REPO_MAX.core12!,
-    );
-    chosen = core;
-    if (level === 'confirm24') {
-      const addon: Instance[] = [];
-      const baseRepoCount: Record<string, number> = {};
-      for (const r of new Set(core.map((i) => i.repo))) {
-        baseRepoCount[r] = repoCount[r] ?? 0;
-      }
-      relax.push(
-        ...fillQuotas(
-          instances,
-          QUOTAS.confirm24_addon!,
-          addon,
-          repoCount,
-          REPO_MAX.confirm24!,
-          core,
-          baseRepoCount,
-        ),
-      );
-      chosen = [...core, ...addon];
+function fixedSuiteMetaVersion(): string {
+  try {
+    const raw = JSON.parse(fs.readFileSync(FIXED_SUITES_PATH, 'utf-8')) as {
+      _meta?: { version?: string };
+    };
+    return String(raw._meta?.version ?? 'official-v1');
+  } catch {
+    return 'official-v1';
+  }
+}
+
+export function listFixedSuites(): Array<Record<string, unknown>> {
+  const version = fixedSuiteMetaVersion();
+  return loadFixedSuiteDefinitions().map((d) => ({
+    suite_id: d.suite_id,
+    name: d.name,
+    level: d.level,
+    description: d.description,
+    instance_count: d.instance_ids.length,
+    created_at: 'fixed',
+    dataset_revision: version,
+    evaluator_revision: 'official-docker-test-runner-v1',
+  }));
+}
+
+export function getFixedSuite(suiteId: string): SuiteManifest {
+  const def = loadFixedSuiteDefinitions().find((d) => d.suite_id === suiteId);
+  if (!def) throw new Error(`fixed suite not found: ${suiteId}`);
+  return generateSuite(def.level, 0);
+}
+
+export function generateSuite(
+  level: SuiteLevel,
+  _seed?: number | null,
+): SuiteManifest {
+  const instances = loadSuiteInstances();
+  const byId = new Map(instances.map((i) => [i.instance_id, i]));
+  const defs = loadFixedSuiteDefinitions();
+  const def = defs.find((d) => d.level === level);
+  if (!def) {
+    throw new Error(`未找到固定套件定义: ${level};请在 src/data/fixed_suites.json 中维护`);
+  }
+
+  const chosen: Instance[] = [];
+  for (const id of def.instance_ids) {
+    const inst = byId.get(id);
+    if (!inst) {
+      throw new Error(`固定套件 ${def.suite_id} 引用了不存在的实例: ${id}`);
     }
+    chosen.push(inst);
+  }
+
+  const annotated = new Map(
+    difficulty.annotate(chosen).map((r) => [r.instance_id as string, r]),
+  );
+  const quotas: Record<string, number> = { easy: 0, medium: 0, hard: 0 };
+  for (const i of chosen) {
+    const band = difficulty.difficultyBand(i);
+    quotas[band] = (quotas[band] || 0) + 1;
   }
 
   const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
-  const y = new Date().getFullYear();
-  const m = String(new Date().getMonth() + 1).padStart(2, '0');
-  const version = `sbp-mini-${y}.${m}-${level}-s${finalSeed}`;
+  const meta = OFFICIAL_META as Record<string, unknown>;
   const manifest: SuiteManifest = {
-    suite_id: `suite-${level}-s${finalSeed}`,
-    suite_version: version,
+    suite_id: def.suite_id,
+    suite_version: `sbp-fixed-${def.suite_id}`,
     level,
-    seed: finalSeed,
-    dataset_revision: String((SEED_META as Record<string, unknown>).version ?? 'seed-demo-v1'),
-    evaluator_revision: 'builtin-mock/heuristic-v1',
-    scaffold_revision: 'single-turn-patch-scaffold-v1',
+    seed: 0,
+    dataset_revision: String(meta.version ?? 'official-v1'),
+    evaluator_revision: 'official-docker-test-runner-v1',
+    scaffold_revision: 'agent-scaffold-v1',
     created_at: now,
-    quotas: {
-      primary: QUOTAS[level === 'smoke6' ? 'smoke6' : 'core12']!,
-      ...(level === 'confirm24' ? { addon: QUOTAS.confirm24_addon! } : {}),
-    },
-    relaxations: relax,
+    quotas: { primary: quotas },
+    relaxations: ['固定套件：不随机抽样，题目由 src/data/fixed_suites.json 固定'],
     instances: chosen.map((i) => {
       const row = annotated.get(i.instance_id)!;
       return {

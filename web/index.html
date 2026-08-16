@@ -13,13 +13,14 @@
       <span class="brand-logo">SBP</span>
       <div>
         <div class="brand-title">SWE-bench Pro 分层最小集评测框架</div>
-        <div class="brand-sub">Smoke-6 → Core-12 → Confirm-24 · Provider A/B 对比 · 分歧复测</div>
+        <div class="brand-sub">Smoke-6 → Core-12 → Confirm-24 · 单模型评测 · 运行后对比</div>
       </div>
     </div>
     <nav class="tabs" id="tabs">
       <button class="tab active" data-tab="run">🚀 新建评测</button>
       <button class="tab" data-tab="monitor">📡 运行监控</button>
       <button class="tab" data-tab="report">📊 结果报告</button>
+      <button class="tab" data-tab="compare">🔁 对比</button>
       <button class="tab" data-tab="pool">🗂️ 实例与套件</button>
     </nav>
   </div>
@@ -29,27 +30,19 @@
 
 <!-- ============ Tab 1: 新建评测 ============ -->
 <section id="tab-run" class="tabpanel active">
-  <div class="grid-2">
-    <div class="card provider-card" id="card-a">
+  <div>
+    <div class="card provider-card" id="card-provider">
       <div class="card-head">
         <span class="dot dot-a"></span>
-        <h3>Provider A · Baseline(基线端)</h3>
+        <h3>Provider / 模型</h3>
       </div>
-      <div class="segment" id="baseline-source">
-        <button data-v="new" class="active">本次填写<small>实跑基线端</small></button>
-        <button data-v="reuse">复用已完成基线<small>基线不重跑</small></button>
-      </div>
-      <div id="reuse-row" style="display:none;margin-top:10px">
-        <select id="reuse-baseline" class="select" style="width:100%"></select>
-        <div class="hint" id="reuse-hint">选择一次已完成的基线单端运行;套件与评测模式将自动沿用该运行。</div>
-      </div>
-      <div class="form-grid" data-provider="a" id="form-a" style="margin-top:10px">
+      <div class="form-grid" data-provider="provider" id="form-provider" style="margin-top:10px">
         <div class="span-2 profile-row">
-          <select id="profile-select-a" class="select profile-select" title="选择已保存的 Provider 配置并载入表单"></select>
-          <button class="btn sm" type="button" id="btn-save-a" title="以当前「名称」保存表单配置(同名覆盖)">💾 保存</button>
-          <button class="btn sm danger" type="button" id="btn-del-profile-a" title="删除当前选中的已保存配置">🗑</button>
+          <select id="profile-select-provider" class="select profile-select" title="选择已保存的 Provider 配置并载入表单"></select>
+          <button class="btn sm" type="button" id="btn-save-provider" title="以当前「名称」保存表单配置(同名覆盖)">💾 保存</button>
+          <button class="btn sm danger" type="button" id="btn-del-profile-provider" title="删除当前选中的已保存配置">🗑</button>
         </div>
-        <label>名称<input name="name" value="Baseline"></label>
+        <label>名称<input name="name" value="Provider"></label>
         <label class="span-2">Base URL
           <input name="base_url" placeholder="https://api.example.com/v1">
         </label>
@@ -107,86 +100,8 @@
           <input name="price_output_per_m" type="number" step="0.1" min="0" placeholder="输出" title="输出">
         </div>
         <div class="span-2 test-row">
-          <button class="btn sm" type="button" id="btn-test-a" title="发送一次最小请求验证端点、密钥、模型与路由配置">🔌 测试连通</button>
-          <span class="test-status" id="test-status-a"></span>
-        </div>
-      </div>
-    </div>
-
-    <div class="card provider-card" id="card-b">
-      <div class="card-head">
-        <span class="dot dot-b"></span>
-        <h3>Provider B · Candidate(候选端)</h3>
-        <label class="toggle" id="enable-b-wrap" title="不勾选则仅跑基线端;单端基线运行完成后可被后续评测复用">
-          <input type="checkbox" id="enable-b" checked> 启用 A/B 对比(不勾选 = 仅跑基线)
-        </label>
-      </div>
-      <div class="form-grid" data-provider="b" id="form-b">
-        <div class="span-2 profile-row">
-          <select id="profile-select-b" class="select profile-select" title="选择已保存的 Provider 配置并载入表单"></select>
-          <button class="btn sm" type="button" id="btn-save-b" title="以当前「名称」保存表单配置(同名覆盖)">💾 保存</button>
-          <button class="btn sm danger" type="button" id="btn-del-profile-b" title="删除当前选中的已保存配置">🗑</button>
-        </div>
-        <label>名称<input name="name" value="Candidate"></label>
-        <label class="span-2">Base URL
-          <input name="base_url" placeholder="https://api.example.com/v1">
-        </label>
-        <label>Model ID<input name="model" placeholder="与 A 相同模型对比 Provider"></label>
-        <label>API Key<input name="api_key" type="password" placeholder="sk-...(必填)"></label>
-        <label>Temperature<input name="temperature" type="number" step="0.1" min="0" max="2" value="1"></label>
-        <label>Top P<input name="top_p" type="number" step="0.05" min="0" max="1" value="0.95"></label>
-        <label>Max Output Tokens<input name="max_tokens" type="number" step="256" min="256" value="32768"></label>
-        <label>Reasoning Effort<input name="reasoning_effort" placeholder="low/medium/high/max(留空不发送)" value="max"></label>
-        <details class="span-2 routing-box">
-          <summary>Provider 路由(OpenRouter 扩展,可选)</summary>
-          <div class="form-grid" style="margin-top:8px">
-            <label class="span-2">Only(只允许,逗号分隔)
-              <input name="pr_only" placeholder="例如 deepinfra — 硬限制,不可用则请求失败">
-            </label>
-            <label class="span-2">Ignore(排除,逗号分隔)
-              <input name="pr_ignore" placeholder="例如 google,openai">
-            </label>
-            <label class="span-2">Order(优先顺序,逗号分隔)
-              <input name="pr_order" placeholder="例如 deepinfra,fireworks-ai">
-            </label>
-            <label>Allow Fallbacks
-              <select name="pr_allow_fallbacks">
-                <option value="">默认(允许)</option>
-                <option value="false">false(禁止降级)</option>
-              </select>
-            </label>
-            <label>Sort
-              <select name="pr_sort">
-                <option value="">默认</option>
-                <option value="price">price(按价格)</option>
-                <option value="throughput">throughput(按吞吐)</option>
-              </select>
-            </label>
-            <label>Require Parameters
-              <select name="pr_require_parameters">
-                <option value="">默认</option>
-                <option value="true">true(须支持全部参数)</option>
-              </select>
-            </label>
-            <label>Data Policy
-              <select name="pr_data_policy">
-                <option value="">默认</option>
-                <option value="deny">deny(禁止训练/日志)</option>
-                <option value="flexible">flexible</option>
-              </select>
-            </label>
-          </div>
-          <div class="hint">对应请求体顶层 <code>provider</code> 对象(如 <code>{"only":["deepinfra"]}</code>);非 OpenRouter 端点请保持折叠留空。</div>
-        </details>
-        <div class="span-2 price-row">
-          <span class="price-title">价格($/1M tokens,可选)</span>
-          <input name="price_input_per_m" type="number" step="0.1" min="0" placeholder="输入" title="输入">
-          <input name="price_cached_per_m" type="number" step="0.1" min="0" placeholder="缓存" title="缓存">
-          <input name="price_output_per_m" type="number" step="0.1" min="0" placeholder="输出" title="输出">
-        </div>
-        <div class="span-2 test-row">
-          <button class="btn sm" type="button" id="btn-test-b" title="发送一次最小请求验证端点、密钥、模型与路由配置">🔌 测试连通</button>
-          <span class="test-status" id="test-status-b"></span>
+          <button class="btn sm" type="button" id="btn-test-provider" title="发送一次最小请求验证端点、密钥、模型与路由配置">🔌 测试连通</button>
+          <span class="test-status" id="test-status-provider"></span>
         </div>
       </div>
     </div>
@@ -195,6 +110,7 @@
   <div class="card">
     <div class="card-head"><h3>评测设置</h3></div>
     <div class="run-settings">
+
       <div class="setting" id="setting-suite">
         <div class="setting-label">套件层级</div>
         <div class="segment" id="suite-level">
@@ -202,30 +118,16 @@
           <button data-v="core12">Core-12<small>最小可信套件</small></button>
           <button data-v="confirm24">Confirm-24<small>强结论</small></button>
         </div>
-        <div class="hint">真实调用所填 Provider 的 OpenAI 兼容 API;建议先用 Smoke-6 验证连通性。</div>
+        <div class="hint">测试数据来源于官方数据集（预置 27 个实例）；建议先用 Smoke-6 验证连通性。</div>
       </div>
       <div class="setting">
-        <div class="setting-label">抽样 Seed</div>
-        <input id="suite-seed" type="number" value="20260816" class="seed-input">
-        <div class="hint">套件版本指纹组成部分,同 seed 完全可复现。</div>
-      </div>
-      <div class="setting" id="setting-scaffold">
-        <div class="setting-label">Scaffold(评测模式)</div>
-        <div class="segment" id="scaffold-mode">
-          <button data-v="agent" class="active">多轮 Agent<small>对齐官方</small></button>
-          <button data-v="single-turn">单轮补丁<small>旧行为</small></button>
-        </div>
-        <div class="hint">多轮 Agent:模型通过 bash / 查看文件 / 编辑文件工具在工作区内迭代解题,最后提交变更(官方 SWE-Agent 形态的最小本地实现,命令在宿主机工作区执行)。</div>
+        <div class="setting-label">运行环境</div>
+        <div class="hint">始终使用 Docker 官方镜像运行 Agent 与测试；需要 Docker daemon 已启动，且镜像内含 /testbed 仓库。</div>
       </div>
       <div class="setting" id="setting-turns">
         <div class="setting-label">轮次上限</div>
-        <input id="turn-limit" type="number" min="1" max="500" value="200" class="seed-input">
-        <div class="hint">Agent 模式每任务最大对话轮数(官方为 200);单轮模式忽略此项。轮数越多、单任务 API 调用越多,注意成本。</div>
-      </div>
-      <div class="setting">
-        <div class="setting-label">分歧复测次数</div>
-        <input id="repeat-dis" type="number" min="0" max="5" value="2" class="seed-input">
-        <div class="hint">S2 阶段对 A/B 不一致任务每端补跑次数(首次 + 2 = 3-run majority)。</div>
+        <input id="turn-limit" type="number" min="1" max="500" value="50" class="seed-input">
+        <div class="hint">每任务最大对话轮数(默认 50)。轮数越多、单任务 API 调用越多,注意成本。</div>
       </div>
     </div>
     <div class="actions">
@@ -242,7 +144,7 @@
     <table class="table" id="runs-table">
       <thead><tr>
         <th>Run ID</th><th>状态</th><th>套件</th>
-        <th>Baseline</th><th>Candidate</th><th>进度</th><th>创建时间</th><th></th>
+        <th>Provider / Model</th><th>进度</th><th>创建时间</th><th></th>
       </tr></thead>
       <tbody></tbody>
     </table>
@@ -303,7 +205,24 @@
   <div id="report-body"><div class="empty">选择一个已完成的运行查看报告</div></div>
 </section>
 
-<!-- ============ Tab 4: 实例与套件 ============ -->
+<!-- ============ Tab 4: 运行后对比 ============ -->
+<section id="tab-compare" class="tabpanel">
+  <div class="card">
+    <div class="card-head">
+      <h3>对比两次独立运行</h3>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <select id="compare-a" class="select" style="min-width:280px"></select>
+        <span style="color:var(--muted)">vs</span>
+        <select id="compare-b" class="select" style="min-width:280px"></select>
+        <button class="btn primary" id="btn-compare">对比</button>
+      </div>
+    </div>
+    <div class="hint" id="compare-hint">选择两个已完成且使用同一套件的运行进行对比。两次运行相互独立，不会触发复测。</div>
+  </div>
+  <div id="compare-body"><div class="empty">请选择两次运行后点击“对比”</div></div>
+</section>
+
+<!-- ============ Tab 5: 实例与套件 ============ -->
 <section id="tab-pool" class="tabpanel">
   <div class="grid-4" id="pool-stats"></div>
   <div class="card">
@@ -329,17 +248,7 @@
 
   <div class="card">
     <div class="card-head">
-      <h3>套件管理</h3>
-      <div class="suite-gen">
-        <select id="gen-level" class="select">
-          <option value="smoke6">Smoke-6</option>
-          <option value="core12" selected>Core-12</option>
-          <option value="confirm24">Confirm-24</option>
-        </select>
-        <input id="gen-seed" type="number" value="20260816" class="seed-input">
-        <button class="btn primary sm" id="btn-gen-suite">生成分层套件</button>
-      </div>
-    </div>
+
     <div class="grid-2">
       <div>
         <table class="table" id="suites-table">
@@ -356,7 +265,7 @@
 
 <footer class="footer">
   依据《SWE-bench Pro 分层抽取最小集测试框架方案设计 v1.0》实现 ·
-  Resolved 判定为补丁结构启发式,正式结论需接入官方 Docker evaluator
+  Resolved 由官方 Docker 测试环境判定(fail-to-pass / pass-to-pass 真实退出码)
 </footer>
 
 <div class="toast" id="toast"></div>

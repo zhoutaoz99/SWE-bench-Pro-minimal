@@ -128,6 +128,8 @@ export class RunStore {
           seed: m.seed,
           created_at: m.created_at,
           instance_count: m.instances.length,
+          dataset_revision: m.dataset_revision,
+          evaluator_revision: m.evaluator_revision,
         });
       } catch {
         // skip corrupt files
@@ -151,17 +153,16 @@ export class RunStore {
       ended_at: null,
       error: null,
       request: this.sanitizeRequest(request),
-      baseline_run_id: request.baseline_run_id,
       suite: jsonClone(suite),
       progress: {
         done: 0,
-        total: suite.instances.length * (request.provider_b && !request.baseline_run_id ? 2 : 1),
+        total: suite.instances.length,
         current: null,
       },
       instance_status: Object.fromEntries(
         suite.instances.map((i) => [i.instance_id, {}]),
       ),
-      counts: { s1: 0, s2: 0 },
+      counts: { runs: 0 },
       report_ready: false,
     };
     this.writeState(runId, state);
@@ -172,10 +173,8 @@ export class RunStore {
 
   static sanitizeRequest(request: RunRequest): Record<string, any> {
     const data = jsonClone(request) as Record<string, any>;
-    for (const key of ['provider_a', 'provider_b']) {
-      if (data[key]) {
-        data[key].api_key = data[key].api_key ? '***' : '';
-      }
+    if (data.provider) {
+      data.provider.api_key = data.provider.api_key ? '***' : '';
     }
     return data;
   }
@@ -204,22 +203,16 @@ export class RunStore {
       };
     };
 
-    const baselineBlock = providerBlock(request.provider_a);
-    if (baselineBlock && request.baseline_run_id) {
-      baselineBlock.reused_from = request.baseline_run_id;
-    }
+    const providerBlockOut = providerBlock(request.provider);
     const manifest: Record<string, any> = {
       run_id: runId,
       created_at: now(),
       suite_id: suite.suite_id,
       suite_version: suite.suite_version,
-      repeat_disagreements: request.repeat_disagreements,
       turn_limit: request.turn_limit,
-      scaffold: request.scaffold === 'agent' ? 'agent-scaffold-v1' : 'single-turn-patch-scaffold-v1',
-      baseline_run_id: request.baseline_run_id,
+      scaffold: 'agent-scaffold-v1',
       providers: {
-        ...(baselineBlock ? { baseline: baselineBlock } : {}),
-        ...(request.provider_b ? { candidate: providerBlock(request.provider_b) } : {}),
+        ...(providerBlockOut ? { provider: providerBlockOut } : {}),
       },
     };
     const runDir = this.runDir(runId);
@@ -280,23 +273,6 @@ export class RunStore {
       .map((line) => JSON.parse(line));
   }
 
-  importBaseline(runId: string, baselineRunId: string): Array<Record<string, any>> {
-    const records = this.loadRecords(baselineRunId).filter(
-      (r) => r.provider_role === 'baseline',
-    );
-    for (const rec of records) this.appendRecord(runId, rec);
-    const src = path.join(this.root, baselineRunId, 'trajectories');
-    const dst = path.join(this.root, runId, 'trajectories');
-    if (fs.existsSync(src)) {
-      for (const name of fs.readdirSync(src)) {
-        if (name.includes('__baseline__') && name.endsWith('.json')) {
-          fs.copyFileSync(path.join(src, name), path.join(dst, name));
-        }
-      }
-    }
-    return records;
-  }
-
   saveTrajectory(
     runId: string,
     instanceId: string,
@@ -329,7 +305,7 @@ export class RunStore {
     const runDir = this.runDir(runId);
     fs.writeFileSync(path.join(runDir, 'report.json'), JSON.stringify(report, null, 2), 'utf-8');
     fs.writeFileSync(path.join(runDir, 'eval_results.csv'), '\uFEFF' + csvText, 'utf-8');
-    fs.writeFileSync(path.join(runDir, 'paired_report.md'), mdText, 'utf-8');
+    fs.writeFileSync(path.join(runDir, 'report.md'), mdText, 'utf-8');
   }
 
   loadReport(runId: string): Record<string, any> | null {
@@ -357,19 +333,19 @@ export class RunStore {
           fs.readFileSync(path.join(this.root, name, 'run_state.json'), 'utf-8'),
         ) as Record<string, any>;
         const req = state.request || {};
-        const pa = req.provider_a || {};
-        const pb = req.provider_b || {};
+        const p = req.provider || {};
         out.push({
           run_id: state.run_id,
           status: state.status,
           phase: state.phase ?? '-',
           created_at: state.created_at,
           suite_level: state.suite?.level,
-          model_a: pa.model,
-          model_b: pb.model,
-          base_url_a: pa.base_url,
-          base_url_b: pb.base_url,
-          baseline_run_id: state.baseline_run_id,
+          provider_name: p.name,
+          model: p.model,
+          base_url: p.base_url,
+          dataset_source: req.dataset_source ?? 'official',
+          docker_enabled: Boolean(req.docker_enabled ?? false),
+          evaluator: req.evaluator ?? 'official',
           progress: state.progress || {},
           report_ready: state.report_ready ?? false,
         });
@@ -380,55 +356,10 @@ export class RunStore {
     return out;
   }
 
-  listBaselines(): Array<Record<string, any>> {
-    const out: Array<Record<string, any>> = [];
-    if (!fs.existsSync(this.root)) return out;
-    const entries = fs
-      .readdirSync(this.root, { withFileTypes: true })
-      .filter((e) => e.isDirectory() && fs.existsSync(path.join(this.root, e.name, 'run_state.json')))
-      .map((e) => e.name)
-      .sort()
-      .reverse();
-    for (const name of entries) {
-      try {
-        const state = JSON.parse(
-          fs.readFileSync(path.join(this.root, name, 'run_state.json'), 'utf-8'),
-        ) as Record<string, any>;
-        const req = state.request || {};
-        if (
-          state.status !== 'completed' ||
-          !state.report_ready ||
-          req.provider_b ||
-          req.baseline_run_id
-        ) {
-          continue;
-        }
-        const suite = state.suite || {};
-        const report = this.loadReport(state.run_id) || {};
-        out.push({
-          run_id: state.run_id,
-          created_at: state.created_at,
-          model: req.provider_a?.model,
-          name: req.provider_a?.name,
-          base_url: req.provider_a?.base_url,
-          suite_id: suite.suite_id,
-          suite_level: suite.level,
-          suite_version: suite.suite_version,
-          n_instances: suite.instances?.length ?? 0,
-          scaffold: req.scaffold || 'single-turn',
-          turn_limit: req.turn_limit ?? 50,
-          resolved: report.summary?.resolved_a,
-        });
-      } catch {
-        // skip
-      }
-    }
-    return out;
-  }
-
   readArtifact(runId: string, name: string): string | null {
     const allowed = new Set([
       'report.json',
+      'report.md',
       'paired_report.md',
       'run_manifest.json',
       'suite_manifest.json',

@@ -1,0 +1,81 @@
+{
+  "_meta": {
+    "name": "sbp-fixed-suites-official",
+    "description": "固定套件定义：由官方 ScaleAI/SWE-bench_Pro 数据集构造，不再使用演示种子。",
+    "version": "official-v1"
+  },
+  "suites": [
+    {
+      "suite_id": "suite-smoke6-fixed",
+      "name": "Smoke-6 固定冒烟套件",
+      "level": "smoke6",
+      "description": "固定 6 题（官方数据集构造），用于快速连通性验证。",
+      "instance_ids": [
+        "instance_flipt-io__flipt-ea9a2663b176da329b3f574da2ce2a664fc5b4a1",
+        "instance_ansible__ansible-e40889e7112ae00a21a2c74312b330e67a766cc0-v1055803c3a812189a1133297f7f5468579283f86",
+        "instance_tutao__tutanota-219bc8f05d7b980e038bc1524cb021bf56397a1b-vee878bb72091875e912c52fc32bc60ec3760227b",
+        "instance_protonmail__webclients-815695401137dac2975400fc610149a16db8214b",
+        "instance_future-architect__vuls-6eff6a9329a65cc412e79b8f82444dfa3d0f0b5a",
+        "instance_internetarchive__openlibrary-f3b26c2c0721f8713353fe4b341230332e30008d-v0f5aece3601a5b4419f7ccec1dbda2071be28ee4"
+      ],
+      "relaxations": []
+    },
+    {
+      "suite_id": "suite-core12-fixed",
+      "name": "Core-12 固定核心套件",
+      "level": "core12",
+      "description": "固定 12 题（官方数据集构造），用于单模型独立运行后对比。",
+      "instance_ids": [
+        "instance_flipt-io__flipt-ea9a2663b176da329b3f574da2ce2a664fc5b4a1",
+        "instance_ansible__ansible-395e5e20fab9cad517243372fa3c3c5d9e09ab2a-v7eee2454f617569fd6889f2211f75bc02a35f9f8",
+        "instance_protonmail__webclients-5d2576632037d655c3b6a28e98cd157f7e9a5ce1",
+        "instance_tutao__tutanota-fe240cbf7f0fdd6744ef7bef8cb61676bcdbb621-vc4e41fd0029957297843cb9dec4a25c7c756f029",
+        "instance_internetarchive__openlibrary-8a9d9d323dfcf2a5b4f38d70b1108b030b20ebf3-v13642507b4fc1f8d234172bf8129942da2c2ca26",
+        "instance_future-architect__vuls-6eff6a9329a65cc412e79b8f82444dfa3d0f0b5a",
+        "instance_qutebrowser__qutebrowser-473a15f7908f2bb6d670b0e908ab34a28d8cf7e2-v363c8a7e5ccdf6968fc7ab84a2053ac78036691d",
+        "instance_gravitational__teleport-3587cca7840f636489449113969a5066025dd5bf",
+        "instance_element-hq__element-web-5e8488c2838ff4268f39db4a8cca7d74eecf5a7e-vnan",
+        "instance_navidrome__navidrome-e12a14a87d392ac70ee4cc8079e3c3e0103dbcb2",
+        "instance_flipt-io__flipt-c188284ff0c094a4ee281afebebd849555ebee59",
+        "instance_NodeBB__NodeBB-84dfda59e6a0e8a77240f939a7cb8757e6eaf945-v2c59007b1005cd5cd14cbb523ca5229db1fd2dd8"
+      ],
+      "relaxations": []
+    },
+    {
+      "suite_id": "suite-confirm24-fixed",
+      "name": "Confirm-24 固定确认套件",
+      "level": "confirm24",
+      "description": "固定 24 题（官方数据集构造，Core-12 超集），用于更强结论确认。",
+      "instance_ids": [
+        "instance_flipt-io__flipt-ea9a2663b176da329b3f574da2ce2a664fc5b4a1",
+        "instance_ansible__ansible-395e5e20fab9cad517243372fa3c3c5d9e09ab2a-v7eee2454f617569fd6889f2211f75bc02a35f9f8",
+        "instance_protonmail__webclients-5d2576632037d655c3b6a28e98cd157f7e9a5ce1",
+        "instance_tutao__tutanota-fe240cbf7f0fdd6744ef7bef8cb61676bcdbb621-vc4e41fd0029957297843cb9dec4a25c7c756f029",
+        "instance_internetarchive__openlibrary-8a9d9d323dfcf2a5b4f38d70b1108b030b20ebf3-v13642507b4fc1f8d234172bf8129942da2c2ca26",
+        "instance_future-architect__vuls-6eff6a9329a65cc412e79b8f82444dfa3d0f0b5a",
+        "instance_qutebrowser__qutebrowser-473a15f7908f2bb6d670b0e908ab34a28d8cf7e2-v363c8a7e5ccdf6968fc7ab84a2053ac78036691d",
+        "instance_gravitational__teleport-3587cca7840f636489449113969a5066025dd5bf",
+        "instance_element-hq__element-web-5e8488c2838ff4268f39db4a8cca7d74eecf5a7e-vnan",
+        "instance_navidrome__navidrome-e12a14a87d392ac70ee4cc8079e3c3e0103dbcb2",
+        "instance_flipt-io__flipt-c188284ff0c094a4ee281afebebd849555ebee59",
+        "instance_NodeBB__NodeBB-84dfda59e6a0e8a77240f939a7cb8757e6eaf945-v2c59007b1005cd5cd14cbb523ca5229db1fd2dd8",
+        "instance_protonmail__webclients-d8ff92b414775565f496b830c9eb6cc5fa9620e6",
+        "instance_gravitational__teleport-b8fbb2d1e90ffcde88ed5fe9920015c1be075788-vee9b09fb20c43af7e520f57e9239bbcf46b7113d",
+        "instance_ansible__ansible-9759e0ca494de1fd5fc2df2c5d11c57adbe6007c-v1055803c3a812189a1133297f7f5468579283f86",
+        "instance_future-architect__vuls-139f3a81b66c47e6d8f70ce6c4afe7a9196a6ea8",
+        "instance_navidrome__navidrome-97434c1789a6444b30aae5ff5aa124a96a88f504",
+        "instance_element-hq__element-web-fe14847bb9bb07cab1b9c6c54335ff22ca5e516a-vnan",
+        "instance_internetarchive__openlibrary-b112069e31e0553b2d374abb5f9c5e05e8f3dbbe-ve8c8d62a2b60610a3c4631f5f23ed866bada9818",
+        "instance_qutebrowser__qutebrowser-394bfaed6544c952c6b3463751abab3176ad4997-vafb3e8e01b31319c66c4e666b8a3b1d8ba55db24",
+        "instance_tutao__tutanota-219bc8f05d7b980e038bc1524cb021bf56397a1b-vee878bb72091875e912c52fc32bc60ec3760227b",
+        "instance_NodeBB__NodeBB-8168c6c40707478f71b8af60300830fe554c778c-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e",
+        "instance_flipt-io__flipt-e50808c03e4b9d25a6a78af9c61a3b1616ea356b",
+        "instance_future-architect__vuls-edb324c3d9ec3b107bf947f00e38af99d05b3e16"
+      ],
+      "relaxations": [
+        "hard: 仓库上限约束放宽(候选不足)",
+        "easy: 仓库上限约束放宽(候选不足)"
+      ]
+    }
+  ]
+}

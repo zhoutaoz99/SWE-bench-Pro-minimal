@@ -1,15 +1,42 @@
 import fs from 'node:fs';
-import { SEED_PATH } from './paths';
+import { SUITE_INSTANCES_PATH } from './paths';
 import { Instance, TaskType, toInstance } from './schemas';
 
-export let SEED_META: Record<string, unknown> = {};
+export let OFFICIAL_META: Record<string, unknown> = {};
 
-export function loadSeedInstances(): Instance[] {
-  const raw = JSON.parse(fs.readFileSync(SEED_PATH, 'utf-8')) as {
+/**
+ * 加载代码仓库内预置的官方 SWE-bench Pro 套件实例。
+ *
+ * 这些实例只包含 Smoke-6 / Core-12 / Confirm-24 三个固定套件引用的任务，
+ * 由 scripts/build_fixed_suites.py 从官方数据集中选出后写入
+ * src/data/suite_instances.json，运行时不依赖外部数据集路径。
+ */
+export function loadSuiteInstances(): Instance[] {
+  const raw = JSON.parse(fs.readFileSync(SUITE_INSTANCES_PATH, 'utf-8')) as {
     _meta?: Record<string, unknown>;
     instances: Array<Record<string, unknown>>;
   };
-  SEED_META = raw._meta ?? {};
+  if (!Array.isArray(raw.instances)) {
+    throw new Error(`suite instances JSON must contain an "instances" array: ${SUITE_INSTANCES_PATH}`);
+  }
+  OFFICIAL_META = raw._meta ?? {};
+  return raw.instances.map((item) => toInstance(item));
+}
+
+/**
+ * 从外部导出的官方 SWE-bench Pro JSON 加载完整实例池。
+ * 当前运行框架默认使用 loadSuiteInstances() 的预置数据；
+ * 此函数保留给需要临时加载完整官方数据集的脚本/高级用法。
+ */
+export function loadOfficialInstancesFromJson(filePath: string): Instance[] {
+  const raw = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as {
+    _meta?: Record<string, unknown>;
+    instances: Array<Record<string, unknown>>;
+  };
+  if (!Array.isArray(raw.instances)) {
+    throw new Error(`official dataset JSON must contain an "instances" array: ${filePath}`);
+  }
+  OFFICIAL_META = raw._meta ?? {};
   return raw.instances.map((item) => toInstance(item));
 }
 
@@ -81,18 +108,23 @@ function inferTaskType(statement: string): TaskType {
 /**
  * 从 Hugging Face 加载真实 SWE-bench Pro 数据集。
  *
- * TS 后端默认使用内置种子池；如需真实数据集，建议先通过 Python sidecar
- * 或 HF 导出为 JSON 后复用 loadInstances('seed') 路径。
- * 这里保留接口占位，避免破坏调用方结构。
+ * TS 后端不直接内置 HF 加载；请先通过 scripts/export_official_dataset.py
+ * 导出为 JSON，再使用 loadOfficialInstancesFromJson()。
  */
 export async function loadHfDataset(_revision?: string | null): Promise<Instance[]> {
   throw new Error(
-    'TS 后端暂未内置 Hugging Face datasets 加载；请使用内置种子池，' +
-      '或先用 Python sidecar 将真实数据集导出为 JSON。',
+    'TS 后端暂未内置 Hugging Face datasets 加载；请使用 scripts/export_official_dataset.py 导出 JSON 后，' +
+      '再使用 loadOfficialInstancesFromJson() 或预置的 loadSuiteInstances()。',
   );
 }
 
-export function loadInstances(source: 'seed' | 'hf' = 'seed', revision?: string | null): Instance[] | Promise<Instance[]> {
-  if (source === 'hf') return loadHfDataset(revision);
-  return loadSeedInstances();
+export function loadInstances(
+  source: 'official' | 'hf' = 'official',
+  pathOrRevision?: string | null,
+): Instance[] | Promise<Instance[]> {
+  if (source === 'official') {
+    if (pathOrRevision) return loadOfficialInstancesFromJson(pathOrRevision);
+    return loadSuiteInstances();
+  }
+  return loadHfDataset(pathOrRevision);
 }
