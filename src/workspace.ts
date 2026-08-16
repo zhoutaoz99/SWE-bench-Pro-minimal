@@ -125,7 +125,7 @@ export class AgentWorkspace {
   private readonly git: string | null;
   private readonly docker: boolean;
   private readonly image: string;
-  private readonly repoDir: string;
+  private repoDir: string;
   private readonly containerName: string;
   private containerReady = false;
 
@@ -599,6 +599,17 @@ export class AgentWorkspace {
         }
       }
     }
+    // 数据集 repo_directory(/testbed)与官方镜像实际仓库位置(多为 /app)不一致，
+    // 容器启动后以 .git 实际位置为准：无 .git 时用 git rev-parse 探测 WorkingDir。
+    const probe = this.dockerSync([
+      'exec',
+      this.containerName,
+      'sh',
+      '-c',
+      `if [ -e "${this.repoDir}/.git" ]; then echo "${this.repoDir}"; else git rev-parse --show-toplevel 2>/dev/null; fi`,
+    ]);
+    const found = probe.output.trim().split('\n').pop() || '';
+    if (found.startsWith('/')) this.repoDir = found;
     this.containerReady = true;
   }
 

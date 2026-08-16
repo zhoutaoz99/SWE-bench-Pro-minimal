@@ -35,7 +35,7 @@ export async function evaluateOfficialDocker(
   options: OfficialEvalOptions = {},
 ): Promise<EvalOutcome> {
   const image = options.image || inst.docker_image;
-  const repoDir = options.repoDir || process.env.SBP_OFFICIAL_REPO_DIR || '/testbed';
+  let repoDir = options.repoDir || process.env.SBP_OFFICIAL_REPO_DIR || '/testbed';
   const timeoutMs = options.timeoutMs || Number(process.env.SBP_EVAL_TIMEOUT || '600000');
   const method = 'official-docker-test-runner-v1';
 
@@ -63,14 +63,18 @@ export async function evaluateOfficialDocker(
 
   const container = `sbp-eval-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   try {
+    // 官方镜像 ENTRYPOINT 为 /bin/sh，直接传 sleep infinity 会被当作脚本文件名导致容器立即退出，
+    // 显式覆盖 entrypoint 保证执行 sh -c 'sleep infinity'（同 workspace.ts keepAliveArgs 的约束）。
     const create = dockerSync([
       'create',
       '--name',
       container,
       '-i',
+      '--entrypoint',
+      'sh',
       image,
-      'sleep',
-      'infinity',
+      '-c',
+      'sleep infinity',
     ]);
     if (create.code !== 0) {
       return { ...baseOutcome, detail: `docker create failed: ${create.output.slice(0, 500)}` };
@@ -80,6 +84,7 @@ export async function evaluateOfficialDocker(
       dockerSync(['rm', '-f', container]);
       return { ...baseOutcome, detail: `docker start failed: ${start.output.slice(0, 500)}` };
     }
+    repoDir = resolveRepoDir(container, repoDir);
 
     dockerWriteFile(container, '/tmp/agent.patch', patch);
     if (inst.test_patch) {
@@ -149,6 +154,20 @@ function dockerSync(args: string[], input?: string): { code: number; output: str
   });
   const output = `${res.stdout || ''}${res.stderr || ''}`;
   return { code: res.status ?? 1, output };
+}
+
+/** 数据集 repo_directory(/testbed)与官方镜像实际仓库位置(多为 /app)不一致，
+ *  以容器内 .git 实际位置为准：preferred 无 .git 时用 git rev-parse 探测 WorkingDir。 */
+function resolveRepoDir(container: string, preferred: string): string {
+  const probe = dockerSync([
+    'exec',
+    container,
+    'sh',
+    '-c',
+    `if [ -e "${preferred}/.git" ]; then echo "${preferred}"; else git rev-parse --show-toplevel 2>/dev/null; fi`,
+  ]);
+  const found = probe.output.trim().split('\n').pop() || '';
+  return found.startsWith('/') ? found : preferred;
 }
 
 function dockerWriteFile(container: string, containerPath: string, content: string): void {

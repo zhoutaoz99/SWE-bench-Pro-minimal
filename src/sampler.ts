@@ -265,6 +265,12 @@ export function generateSuite(
         interface: i.interface,
         fail_to_pass: i.fail_to_pass,
         pass_to_pass: i.pass_to_pass,
+        // 评测必需字段：没有 test_patch 则 F2P 测试无从注入，仓库/安装信息缺失会导致评测跑错目录
+        base_commit: i.base_commit,
+        repo_directory: i.repo_directory,
+        install: i.install,
+        test_cmd: i.test_cmd,
+        test_patch: i.test_patch,
       };
     }),
   };
