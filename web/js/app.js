@@ -430,6 +430,7 @@ async function pollMonitor() {
     ]);
   } catch (_) { clearInterval(monitorTimer); return; }
   liveEntries = liveInfo.entries || [];
+  renderLiveStats(liveInfo.summary);
 
   const [cls, label] = STATUS_BADGE[st.status] || ["pending", st.status];
   const { done, total } = st.progress;
@@ -482,6 +483,26 @@ async function pollMonitor() {
     if (st.status === "failed") toast(`运行失败:${(st.error || "").split("\n").slice(-2)[0]}`, 5000);
   }
 }
+
+function renderLiveStats(summary) {
+  const box = $("#live-stats");
+  if (!box) return;
+  if (!summary || !summary.total_tokens) {
+    box.style.display = "none";
+    return;
+  }
+  box.style.display = "flex";
+  $("#live-rate").textContent =
+    summary.overall_tps != null ? summary.overall_tps.toFixed(1) : "—";
+  $("#live-cache").textContent = `${Number(summary.cache_hit_rate || 0).toFixed(1)}%`;
+  $("#live-input").textContent = Number(summary.prompt_tokens || 0).toLocaleString();
+  $("#live-output").textContent = Number(summary.completion_tokens || 0).toLocaleString();
+  $("#live-cost").textContent = `$${Number(summary.cost_usd || 0).toFixed(6)}`;
+  $("#live-stream-count").textContent = summary.streaming_count
+    ? ` · ${summary.streaming_count} 路流式输出中`
+    : "";
+}
+
 
 /* ---------------- 实时输出面板 ---------------- */
 
@@ -544,7 +565,7 @@ function pickLiveEntry(entries) {
 }
 
 function switchLiveTab(iid, role, runIndex) {
-  liveSel = { iid, role, runIndex, rOffset: 0, cOffset: 0 };
+  liveSel = { iid, role, runIndex, rOffset: 0, cOffset: 0, finalized: false };
   $("#live-reasoning").textContent = "";
   $("#live-content").textContent = "";
   $("#live-r-len").textContent = "";
@@ -566,7 +587,7 @@ async function updateLivePanel(immediate = false) {
   }
   const finished = meta.status === "done"
     && meta.reasoning_chars <= rOffset && meta.content_chars <= cOffset;
-  if (finished && !immediate) return;   // 已取完且结束,跳过本轮
+  if (finished && liveSel.finalized && !immediate) return;   // 已取完且结束,跳过本轮
   let d;
   try {
     d = await api(`/api/runs/${selectedRunId}/live-detail`
@@ -575,22 +596,33 @@ async function updateLivePanel(immediate = false) {
   } catch (err) { $("#live-meta").innerHTML = esc(err.message); return; }
   liveSel.rOffset = d.r_offset;
   liveSel.cOffset = d.c_offset;
+  liveSel.finalized = finished;
   const rPre = $("#live-reasoning"), cPre = $("#live-content");
   if (d.reasoning_part) stickScroll(rPre, () => { rPre.textContent += d.reasoning_part; });
   if (d.content_part) stickScroll(cPre, () => { cPre.textContent += d.content_part; });
   $("#live-r-len").textContent = `${d.reasoning_chars} 字符`;
   $("#live-c-len").textContent = `${d.content_chars} 字符`;
+  const liveInput = d.prompt_tokens || 0;
+  const liveOutput = d.completion_tokens || 0;
+  const liveCache = d.cached_tokens || 0;
+  const liveCacheRate = liveInput > 0 ? Math.min(100, (liveCache / liveInput) * 100).toFixed(1) : "0.0";
+  const liveRate = d.decode_tps != null ? d.decode_tps.toFixed(1) : "—";
+  const liveCost = `$${Number(d.cost_usd || 0).toFixed(6)}`;
+
   $("#live-meta").innerHTML =
     `<b>${esc(d.model)}</b> · ${role === "baseline" ? "A(基线)" : "B(候选)"} · ${esc(d.phase)} · run ${runIndex}` +
     (d.status === "streaming"
       ? ' · <span style="color:#2563eb">● 流式输出中…</span>'
       : ` · 已结束 finish=${esc(d.finish_reason || "—")}`)
+    + ` · ⚡ 该条 <b>${liveRate}</b> tok/s · 💾 缓存 <b>${liveCacheRate}%</b>`
+    + ` · 🔢 输入 <b>${liveInput.toLocaleString()}</b> · 输出 <b>${liveOutput.toLocaleString()}</b>`
+    + ` · 💰 <b>${liveCost}</b>`
     + ` · 更新于 ${esc((d.updated_at || "").replace("T", " ").slice(11, 23))} UTC`;
 }
 
 $("#btn-cancel").addEventListener("click", async () => {
   if (!selectedRunId) return;
-  try { await api(`/api/runs/${selectedRunId}/cancel`, "POST"); toast("已取消"); }
+  try { await api(`/api/runs/${selectedRunId}/cancel`, "POST"); toast("正在取消…"); }
   catch (err) { toast(err.message); }
 });
 $("#btn-view-report").addEventListener("click", () => gotoTab("report", selectedRunId));

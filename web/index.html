@@ -262,9 +262,17 @@
       <span class="progress-text" id="prog-text">0 / 0</span>
       <span class="phase-badge" id="phase-badge">-</span>
     </div>
+    <div class="live-stats" id="live-stats" style="display:none">
+      <span title="整个测试的平均速率 = 累计输出 tokens / 累计任务耗时">⚡ 平均 <b id="live-rate">—</b> tok/s</span>
+      <span title="缓存命中率 = 缓存 tokens / 输入 tokens">💾 缓存命中 <b id="live-cache">0%</b></span>
+      <span title="累计输入 tokens(含缓存)">🔢 输入 <b id="live-input">0</b></span>
+      <span title="累计输出 tokens">🔢 输出 <b id="live-output">0</b></span>
+      <span title="本次运行已产生的推理花费(按配置价格估算)">💰 花费 <b id="live-cost">$0.000000</b></span>
+      <span id="live-stream-count" style="color:var(--muted)"></span>
+    </div>
     <div class="inst-grid" id="inst-grid"></div>
     <div style="font-size:11.5px;color:var(--muted);margin-top:6px">
-      💡 点击实例卡片可实时查看该题的流式输出(思考过程与补丁正文,约 1.2s 刷新)
+      💡 顶部实时汇总平均 token/s、缓存命中率、输入/输出 tokens 与花费;点击实例卡片可实时查看该题的流式输出(思考过程与补丁正文,约 1.2s 刷新)
     </div>
     <div id="live-panel" style="display:none;margin-top:12px;border:1px solid #e2e8f0;border-radius:8px;padding:12px;background:#fbfdff">
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">

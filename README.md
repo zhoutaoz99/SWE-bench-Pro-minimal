@@ -11,9 +11,14 @@
 ## 快速开始
 
 ```bash
-pip install -r requirements.txt
-python run_server.py          # 默认 http://127.0.0.1:8765,可指定端口:python run_server.py 9000
+npm install
+npm run build                 # 编译到 dist/
+npm start                     # 默认 http://127.0.0.1:8765,可用 PORT 环境变量或参数指定端口
+# 开发模式（自动重启）:
+npm run dev
 ```
+
+代码位于 `src/`，入口为 `src/server.ts`。
 
 打开浏览器访问 `http://127.0.0.1:8765`:
 
@@ -21,7 +26,7 @@ python run_server.py          # 默认 http://127.0.0.1:8765,可指定端口:pyt
    Model ID、API Key 与采样参数;基线来源可选"本次填写"或"复用已完成基线"(只实跑候选端);
    选择套件层级后启动。
 2. **运行监控** — 实时进度条、阶段徽章(S1 主评测 / S2 分歧复测 / 分析汇总)、
-   每任务 A/B 双端 PASS/FAIL 网格。
+   顶部实时汇总平均 token/s、缓存命中率、输入/输出 tokens 与花费;点击实例可实时查看流式输出,每任务 A/B 双端 PASS/FAIL 网格。
 3. **结果报告** — 汇总卡片、分难度 Resolved 对比图、成对结果矩阵、Token/吞吐/成本图、
    每任务明细(可展开查看失败轨迹与补丁)、GREEN/YELLOW/RED 决策与建议。
 4. **实例与套件** — 浏览 36 题候选池(难度分/经验分/分层标签)、
@@ -55,19 +60,19 @@ Resolved 为补丁结构启发式判定。建议先用 Smoke-6 验证连通性�
 
 > ⚠️ **正式结论需接入官方 evaluator**:真实的 fail-to-pass / pass-to-pass 判定必须在
 > Docker 中执行任务测试套件(参考 [scaleapi/SWE-bench_Pro-os](https://github.com/scaleapi/SWE-bench_Pro-os),
-> 设计文档 §5 质量门禁 G1–G7)。本框架的 `app/evaluator.py` 预留了替换点。
+> 设计文档 §5 质量门禁 G1–G7)。本框架的 `src/evaluator.ts` 预留了替换点。
 
 ## 与设计文档的对应关系
 
 | 设计文档章节 | 实现 |
 |---|---|
-| §5 数据冻结 | `dataset.py`:seed 池版本指纹 `seed-demo-v1`;`load_hf_dataset(revision)` 支持 HF 固定 revision 加载 |
-| §7 难度评分 | `difficulty.py`:`D_struct = 0.40F+0.35L+0.15T+0.10S`、`D_emp = 1-p_hist`、`D_total = 0.6D_emp+0.4D_struct`、InfoScore |
-| §8 最小集定义 | `sampler.py`:Smoke-6(2/2/2)、Core-12(E2/M6/H4、每仓≤2、≥7 仓库)、Confirm-24(Core-12 + 12 补充,Medium 约半) |
+| §5 数据冻结 | `src/dataset.ts`:seed 池版本指纹 `seed-demo-v1`;HF 加载接口预留 |
+| §7 难度评分 | `src/difficulty.ts`:`D_struct = 0.40F+0.35L+0.15T+0.10S`、`D_emp = 1-p_hist`、`D_total = 0.6D_emp+0.4D_struct`、InfoScore |
+| §8 最小集定义 | `src/sampler.ts`:Smoke-6(2/2/2)、Core-12(E2/M6/H4、每仓≤2、≥7 仓库)、Confirm-24(Core-12 + 12 补充,Medium 约半) |
 | §9 抽样算法 | 贪心选择 `InfoScore + diversity_gain + 任务类型缺口加成`,仓库上限与相邻带漂移放宽均记录进 manifest |
 | §10 公平性控制 | 两端同 prompt / 同参数 / 同套件;API key 仅进程内保存,落盘脱敏,端点记哈希 |
-| §11 指标体系 | `analyzer.py`:Resolved、Paired Disagreement、n10/n01、paired_delta、精确 McNemar、Wilson 参考、二级速度/成本指标、Cost per Solved Task |
-| §12 自适应复测 | `runner.py`:S1 首轮 → 仅对分歧题 S2 每端补跑 `repeat_disagreements` 次 → 3-run majority → 稳定分歧 → GREEN(≤1 且无集中)/ YELLOW(=2 或集中)/ RED(≥3 或类别扫荡) |
+| §11 指标体系 | `src/analyzer.ts`:Resolved、Paired Disagreement、n10/n01、paired_delta、精确 McNemar、Wilson 参考、二级速度/成本指标、Cost per Solved Task |
+| §12 自适应复测 | `src/runner.ts`:S1 首轮 → 仅对分歧题 S2 每端补跑 `repeat_disagreements` 次 → 3-run majority → 稳定分歧 → GREEN(≤1 且无集中)/ YELLOW(=2 或集中)/ RED(≥3 或类别扫荡) |
 | §13 成本控制 | 只复测分歧;价格可按端配置($/1M tokens,输入/缓存/输出三档) |
 | §14 报告产物 | `runs/<run_id>/`:`run_manifest.json`、`suite_manifest.json`、`per_run.jsonl`、`eval_results.csv`、`report.json`、`paired_report.md`、`trajectories/`(仅失败与分歧任务) |
 | §15 示例候选 | 36 题种子池含文档给出的 6 个候选(qutebrowser Qt warning、OpenLibrary Wikidata、Navidrome scrobbler、NodeBB webfinger/email、Teleport uploader) |
@@ -90,19 +95,21 @@ Resolved 为补丁结构启发式判定。建议先用 Smoke-6 验证连通性�
 ## 项目结构
 
 ```
-├── run_server.py            # 启动入口
-├── app/
-│   ├── schemas.py           # Pydantic 模型(Provider 配置 / 实例 / 运行记录)
-│   ├── dataset.py           # 种子池加载 + HF 真实数据集加载(可选拓展)
-│   ├── difficulty.py        # D_struct / D_emp / InfoScore / 难度分带
-│   ├── sampler.py           # 分层抽样器(Smoke-6 / Core-12 / Confirm-24)
-│   ├── provider.py          # OpenAI 兼容客户端(流式 TTFT;agent_step 工具调用)
-│   ├── env.py               # Agent 工作区(bash/查看/编辑/submit 工具 + git 补丁提取)
-│   ├── evaluator.py         # fail-to-pass / pass-to-pass 判定(补丁结构启发式)
-│   ├── runner.py            # A/B Runner:S1 → S2 分歧复测 → 分析;支持基线复用(只实跑候选端)
-│   ├── analyzer.py          # 指标 / 成对统计 / 决策 / Markdown 报告
-│   ├── store.py             # runs/ 产物存储(manifest / jsonl / csv / 轨迹)
-│   ├── main.py              # FastAPI API + 静态页托管
+├── package.json             # npm 依赖与脚本
+├── tsconfig.json
+├── src/
+│   ├── server.ts            # Express 入口 + REST API + 静态页托管
+│   ├── schemas.ts           # TS 类型 + zod 校验
+│   ├── dataset.ts           # 种子池加载(HF 加载为可选占位)
+│   ├── difficulty.ts        # 难度评分
+│   ├── sampler.ts           # 分层抽样器
+│   ├── provider.ts          # OpenAI 兼容流式客户端
+│   ├── workspace.ts         # Agent 工作区工具
+│   ├── evaluator.ts         # 补丁启发式判定
+│   ├── runner.ts            # S1/S2 Runner + Agent 循环
+│   ├── analyzer.ts          # 指标 / 统计 / 决策 / Markdown 报告
+│   ├── store.ts             # runs/ 产物存储
+│   ├── live.ts              # 实时输出缓冲
 │   └── data/seed_instances.json   # 36 题演示实例池
 ├── web/                     # 前端(原生 HTML/CSS/JS,自绘 SVG 图表,无构建依赖)
 └── runs/                    # 运行产物(运行时生成)
@@ -115,5 +122,5 @@ Resolved 为补丁结构启发式判定。建议先用 Smoke-6 验证连通性�
    与官方分数不可比,但两端对比公平性成立。
 2. **评测判定**:Resolved 为补丁结构启发式判定。正式结论需接官方 Docker evaluator。
 3. **实例数据**:36 题为演示种子(元数据按公开集仓库结构构造),正式使用应
-   `pip install datasets` 后从 `ScaleAI/SWE-bench_Pro` 固定 revision 加载并跑质量门禁。
+   从 `ScaleAI/SWE-bench_Pro` 固定 revision 加载并跑质量门禁(TS 后端当前保留 HF 加载接口占位)。
 4. **统计置信度**:Core-12 阶段以"稳定方向分歧"为核心证据,p-value 仅作参考(文档 §11.3)。

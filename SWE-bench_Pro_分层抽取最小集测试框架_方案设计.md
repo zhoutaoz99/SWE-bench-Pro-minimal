@@ -244,7 +244,7 @@ InfoScore = 0.45 \* 4\*p_hist\*(1-p_hist)
 
 7.  输出 suite_manifest.json，并记录 dataset/evaluator/scaffold/image 版本指纹。
 
-```python
+```text
 # 伪代码
 selected = []
 while not quotas_satisfied(selected):
