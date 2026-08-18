@@ -8,6 +8,8 @@ const OUTPUT_CAP = 8000;
 const BASH_ENABLED = process.env.SBP_AGENT_BASH !== '0';
 const DOCKER_REPO_DIR = process.env.SBP_OFFICIAL_REPO_DIR || '/testbed';
 const DOCKER_TIMEOUT = Number(process.env.SBP_DOCKER_TIMEOUT || '120');
+// 镜像拉取耗时远超普通 docker 命令，单独允许更长的超时
+const DOCKER_PULL_TIMEOUT = Number(process.env.SBP_DOCKER_PULL_TIMEOUT || '1800');
 
 export interface AgentWorkspaceOptions {
   docker?: boolean;
@@ -572,6 +574,15 @@ export class AgentWorkspace {
     if (!this.image) {
       throw new Error('Docker workspace requires an official image (docker_image)');
     }
+    // docker create 在镜像缺失时会隐式拉取，容易撞上普通命令的超时；
+    // 先显式 pull（独立长超时），再创建容器。
+    const inspect = this.dockerSync(['image', 'inspect', this.image]);
+    if (inspect.code !== 0) {
+      const pull = this.dockerSync(['pull', this.image], undefined, DOCKER_PULL_TIMEOUT * 1000);
+      if (pull.code !== 0) {
+        throw new Error(`docker pull failed for ${this.image}:\n${pull.output}`);
+      }
+    }
     const existing = this.dockerSync(['ps', '-a', '--filter', `name=${this.containerName}`, '--format', '{{.Names}}']);
     const name = existing.output.trim();
     if (!name) {
@@ -580,8 +591,12 @@ export class AgentWorkspace {
         '--name',
         this.containerName,
         '-i',
+        // 各镜像 ENTRYPOINT 不一致(/bin/sh、/bin/bash 等)，
+        // 统一覆盖为 sleep 以保持容器运行，避免入口不匹配导致启动即退出
+        '--entrypoint',
+        'sleep',
         this.image,
-        ...this.keepAliveArgs(),
+        'infinity',
       ]);
       if (create.code !== 0) {
         throw new Error(`docker create failed: ${create.output}`);
@@ -613,46 +628,16 @@ export class AgentWorkspace {
     this.containerReady = true;
   }
 
-  /** 返回让容器保持运行的命令参数。
-   * 这些 SWE-bench 官方镜像的 ENTRYPOINT 是 ["/bin/sh"]，
-   * 直接传 `sleep infinity` 会被 /bin/sh 当作脚本文件打开而失败，
-   * 所以需要根据 ENTRYPOINT 决定是否用 `-c` 传命令字符串。
-   */
-  private keepAliveArgs(): string[] {
-    const inspect = this.dockerSync([
-      'image',
-      'inspect',
-      this.image,
-      '--format',
-      '{{json .Config.Entrypoint}}',
-    ]);
-    let entrypoint: unknown = null;
-    try {
-      entrypoint = JSON.parse(inspect.output.trim());
-    } catch {
-      entrypoint = null;
-    }
-
-    if (Array.isArray(entrypoint) && entrypoint.length === 1 && entrypoint[0] === '/bin/sh') {
-      return ['-c', 'sleep infinity'];
-    }
-    if (
-      Array.isArray(entrypoint) &&
-      entrypoint.length === 2 &&
-      entrypoint[0] === '/bin/sh' &&
-      entrypoint[1] === '-c'
-    ) {
-      return ['sleep infinity'];
-    }
-    return ['sh', '-c', 'sleep infinity'];
-  }
-
-  private dockerSync(args: string[], input?: string): { code: number; output: string } {
+    private dockerSync(
+    args: string[],
+    input?: string,
+    timeoutMs: number = DOCKER_TIMEOUT * 1000,
+  ): { code: number; output: string } {
     const res = spawnSync('docker', args, {
       encoding: 'utf-8',
       windowsHide: true,
       input,
-      timeout: DOCKER_TIMEOUT * 1000,
+      timeout: timeoutMs,
       maxBuffer: 64 * 1024 * 1024,
     });
     const output = `${res.stdout || ''}${res.stderr || ''}`;

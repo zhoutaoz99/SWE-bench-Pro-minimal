@@ -276,8 +276,10 @@ export const liveDetailQuerySchema = z.object({
   instance_id: z.string(),
   role: z.string(),
   run_index: z.coerce.number().int().default(0),
+  turn: z.coerce.number().int().default(0),
   r_offset: z.coerce.number().int().default(0),
   c_offset: z.coerce.number().int().default(0),
+  t_offset: z.coerce.number().int().default(0),
 });
 
 export const compareBodySchema = z.object({

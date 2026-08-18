@@ -1,3 +1,10 @@
+interface LiveTurn {
+  label: string;
+  reasoning: string;
+  content: string;
+  tool: string;
+}
+
 interface LiveEntry {
   run_id: string;
   instance_id: string;
@@ -6,8 +13,7 @@ interface LiveEntry {
   model: string;
   phase: string;
   status: 'streaming' | 'done';
-  reasoning: string;
-  content: string;
+  turns: LiveTurn[];
   started_at: string;
   updated_at: string;
   finish_reason: string | null;
@@ -66,8 +72,7 @@ export function register(
     model,
     phase,
     status: 'streaming',
-    reasoning: '',
-    content: '',
+    turns: [],
     started_at: now(),
     updated_at: now(),
     finish_reason: null,
@@ -85,10 +90,28 @@ export function register(
   return key;
 }
 
-export function appendText(key: string, kind: 'reasoning' | 'content', piece: string): void {
+/** 开始新的一轮(一次模型调用)，后续 appendText/writeText 均落入该轮 */
+export function beginTurn(key: string, label = ''): number {
   const entry = LIVE.get(key);
-  if (!entry || (kind !== 'reasoning' && kind !== 'content')) return;
-  entry[kind] += piece;
+  if (!entry) return -1;
+  entry.turns.push({ label, reasoning: '', content: '', tool: '' });
+  entry.updated_at = now();
+  return entry.turns.length - 1;
+}
+
+function currentTurn(entry: LiveEntry): LiveTurn {
+  if (!entry.turns.length) entry.turns.push({ label: '', reasoning: '', content: '', tool: '' });
+  return entry.turns[entry.turns.length - 1];
+}
+
+export function appendText(
+  key: string,
+  kind: 'reasoning' | 'content' | 'tool',
+  piece: string,
+): void {
+  const entry = LIVE.get(key);
+  if (!entry || (kind !== 'reasoning' && kind !== 'content' && kind !== 'tool')) return;
+  currentTurn(entry)[kind] += piece;
   entry.updated_at = now();
 }
 
@@ -132,6 +155,14 @@ export function finish(
   entry.updated_at = now();
 }
 
+function reasoningChars(entry: LiveEntry): number {
+  return entry.turns.reduce((n, t) => n + t.reasoning.length, 0);
+}
+
+function contentChars(entry: LiveEntry): number {
+  return entry.turns.reduce((n, t) => n + t.content.length, 0);
+}
+
 function meta(entry: LiveEntry): Record<string, unknown> {
   return {
     instance_id: entry.instance_id,
@@ -140,8 +171,10 @@ function meta(entry: LiveEntry): Record<string, unknown> {
     model: entry.model,
     phase: entry.phase,
     status: entry.status,
-    reasoning_chars: entry.reasoning.length,
-    content_chars: entry.content.length,
+    turns_total: entry.turns.length,
+    reasoning_chars: reasoningChars(entry),
+    content_chars: contentChars(entry),
+    tool_chars: entry.turns.reduce((n, t) => n + t.tool.length, 0),
     started_at: entry.started_at,
     updated_at: entry.updated_at,
     finish_reason: entry.finish_reason,
@@ -162,30 +195,54 @@ export function listEntries(runId: string): Array<Record<string, unknown>> {
   return out;
 }
 
+/**
+ * 按轮次的增量拉取。
+ * 客户端上报当前所在轮 turn 及该轮内的 r/c 偏移；
+ * 返回 turns 中从该轮起的所有增量/全文，客户端据此追加或新建轮次块，
+ * 并用 r_offset/c_offset(最后一轮的长度)更新游标。
+ */
 export function getDetail(
   runId: string,
   instanceId: string,
   role: string,
   runIndex: number,
+  turn = 0,
   rOffset = 0,
   cOffset = 0,
+  tOffset = 0,
 ): Record<string, unknown> | null {
   const key = keyFor(runId, instanceId, role, runIndex);
   const entry = LIVE.get(key);
   if (!entry) return null;
+  const last = entry.turns.length - 1;
+  const t = Math.min(Math.max(turn, 0), Math.max(last, 0));
+  const parts: Array<Record<string, unknown>> = [];
+  if (entry.turns.length) {
+    for (let i = t; i <= last; i++) {
+      const tk = entry.turns[i];
+      parts.push({
+        turn: i,
+        label: tk.label,
+        reasoning: i === t ? sliceFrom(tk.reasoning, rOffset) : tk.reasoning,
+        content: i === t ? sliceFrom(tk.content, cOffset) : tk.content,
+        tool: i === t ? sliceFrom(tk.tool, tOffset) : tk.tool,
+      });
+    }
+  }
+  const finalTurn = entry.turns[last];
   return {
     ...meta(entry),
-    r_offset: entry.reasoning.length,
-    c_offset: entry.content.length,
-    reasoning_part:
-      rOffset >= 0 && rOffset <= entry.reasoning.length
-        ? entry.reasoning.slice(rOffset)
-        : '',
-    content_part:
-      cOffset >= 0 && cOffset <= entry.content.length
-        ? entry.content.slice(cOffset)
-        : '',
+    // 客户端下一次轮询应使用的轮次游标(最新一轮)
+    turn: Math.max(last, 0),
+    parts,
+    r_offset: finalTurn ? finalTurn.reasoning.length : 0,
+    c_offset: finalTurn ? finalTurn.content.length : 0,
+    t_offset: finalTurn ? finalTurn.tool.length : 0,
   };
+}
+
+function sliceFrom(text: string, offset: number): string {
+  return offset >= 0 && offset <= text.length ? text.slice(offset) : '';
 }
 
 export function summarizeRun(runId: string): Record<string, unknown> {

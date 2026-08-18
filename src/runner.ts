@@ -282,7 +282,24 @@ export class RunEngine {
       path.join(this.store.runDir(runId), 'workspaces', safeId, `${role}_r${runIndex}`),
       wsOptions,
     );
+    // seed 内含可能的镜像拉取(耗时可达数分钟)，先在进度里提示前端
+    const seedState = this.store.loadState(runId)!;
+    const seedCurrent = seedState.progress.current;
+    if (seedCurrent && seedCurrent.instance_id === inst.instance_id) {
+      seedCurrent.phase = 'pull_image';
+      this.store.updateState(runId, {
+        phase: '正在拉取镜像',
+        progress: seedState.progress,
+      });
+    }
     ws.seed(inst);
+    if (seedCurrent && seedCurrent.instance_id === inst.instance_id) {
+      seedCurrent.phase = 'main';
+      this.store.updateState(runId, {
+        phase: '评测中',
+        progress: seedState.progress,
+      });
+    }
     const provider = new LiveProvider(pconf);
     const system = AGENT_SYSTEM_TMPL.replace('{turns}', String(turnLimit));
     const { user } = buildPrompt(inst);
@@ -311,9 +328,7 @@ export class RunEngine {
     for (let turn = 1; turn <= turnLimit; turn++) {
       await sleep(0);
       throwIfAborted(signal);
-      const header = `\n\n──────── 轮次 ${turn}/${turnLimit} ────────\n`;
-      livemod.appendText(liveKey, 'reasoning', header);
-      livemod.appendText(liveKey, 'content', header);
+      livemod.beginTurn(liveKey, `Turn ${turn}/${turnLimit}`);
       const stepBasePrompt = promptTokens;
       const stepBaseCompletion = completionTokens;
       const stepBaseCached = cachedTokens;
@@ -366,7 +381,15 @@ export class RunEngine {
       if (step.tool_calls.length > 0) {
         for (const call of step.tool_calls) {
           toolCallCount += 1;
+          const brief = call.arguments.slice(0, 120).replace(/\n/g, ' ');
+          // 工具执行可能长达数十秒，先呈现"执行中"，结果就绪后再追加输出
+          livemod.appendText(liveKey, 'tool', `⚙ ${call.name}(${brief}) ⏳ 执行中…\n`);
           const [resultText, isErr] = await ws.executeTool(call.name, call.arguments, signal);
+          livemod.appendText(
+            liveKey,
+            'tool',
+            `${isErr ? '✗' : '✓'} ${resultText.slice(0, 600)}\n\n`,
+          );
           if (isErr) toolErrors += 1;
           if (signal?.aborted) break;
           const toolMsg: Record<string, unknown> = {
@@ -381,12 +404,6 @@ export class RunEngine {
             name: call.name,
             content: resultText.slice(0, 2000),
           });
-          const brief = call.arguments.slice(0, 120).replace(/\n/g, ' ');
-          livemod.appendText(
-            liveKey,
-            'content',
-            `⚙ ${call.name}(${brief})${isErr ? ' ✗' : ''}\n${resultText.slice(0, 600)}\n`,
-          );
           if (call.name === 'submit') {
             submitted = true;
             break;

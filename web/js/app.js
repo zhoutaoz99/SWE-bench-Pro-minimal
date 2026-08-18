@@ -259,8 +259,19 @@ $("#btn-start").addEventListener("click", async () => {
 /* ---------------- 运行监控 ---------------- */
 let selectedRunId = null;
 let monitorTimer = null;
+let liveFastTimer = null;
 let liveEntries = [];
 let liveSel = null;
+let autoOpenedLive = false; // 本次选中运行是否已自动打开过实时面板
+
+/* 实时输出面板的高速轮询：面板打开时以更细粒度拉取流式增量，视觉上接近逐字输出 */
+function startLiveFastPoll() {
+  stopLiveFastPoll();
+  liveFastTimer = setInterval(() => updateLivePanel(), 300);
+}
+function stopLiveFastPoll() {
+  if (liveFastTimer) { clearInterval(liveFastTimer); liveFastTimer = null; }
+}
 
 const STATUS_BADGE = {
   queued: ["pending", "排队中"], running: ["running", "运行中"],
@@ -322,6 +333,7 @@ $("#btn-refresh-runs").addEventListener("click", refreshRuns);
 
 async function selectRun(runId) {
   selectedRunId = runId;
+  autoOpenedLive = false;
   closeLivePanel();
   $("#monitor-detail").style.display = "block";
   $("#monitor-title").textContent = `运行详情 · ${runId}`;
@@ -367,6 +379,7 @@ async function pollMonitor() {
       .map((c, i) => `<span class="spark">${c}</span>`).join("");
     const cur = (st.progress.current || {});
     const running = cur.instance_id === inst.instance_id;
+    const pulling = running && cur.phase === "pull_image";
     const streaming = liveEntries.some((e) =>
       e.instance_id === inst.instance_id && e.status === "streaming");
     const selected = liveSel && liveSel.iid === inst.instance_id;
@@ -374,6 +387,7 @@ async function pollMonitor() {
       ${running ? 'style="border-color:var(--primary);box-shadow:0 0 0 2px rgba(37,99,235,.15)"' : ""}
       ${selected ? 'data-selected="1"' : ""}>
       <div class="iid">${streaming ? '<span style="color:#ef4444" title="流式输出中">●</span> ' : ""}${esc(inst.instance_id)}</div>
+${pulling ? '<div style="color:#2563eb;font-size:11px;margin:2px 0">⏳ 正在拉取镜像（可能需要几分钟）…</div>' : ""}
       <div class="meta">${esc(inst.repo)} · ${esc(inst.language_family)} · ${esc(inst.task_type)} · ${esc(inst.difficulty)}</div>
       <div class="res">
         <span class="res-tag res-a">M</span>${chip(stat.provider)}${runsOf("provider")}
@@ -382,9 +396,19 @@ async function pollMonitor() {
   }).join("");
 
   if (liveSel) updateLivePanel();
+  // 运行后默认打开实时输出面板：首个流式条目出现时自动打开一次
+  // (用户手动收起后不再自动弹出；切换运行时重新允许)
+  else if (!autoOpenedLive) {
+    const streaming = liveEntries.find((e) => e.status === "streaming");
+    if (streaming) {
+      autoOpenedLive = true;
+      openLivePanel(streaming.instance_id);
+    }
+  }
 
   if (["completed", "failed", "cancelled"].includes(st.status)) {
     clearInterval(monitorTimer);
+    stopLiveFastPoll();
     refreshRuns();
     if (st.status === "completed") { loadReportOptions(); loadCompareOptions(); }
     if (st.status === "failed") toast(`运行失败:${(st.error || "").split("\n").slice(-2)[0]}`, 5000);
@@ -420,6 +444,7 @@ function stickScroll(pre, mutate) {
 
 function closeLivePanel() {
   liveSel = null;
+  stopLiveFastPoll();
   $("#live-panel").style.display = "none";
 }
 
@@ -442,10 +467,7 @@ function openLivePanel(iid) {
   $("#live-iid").textContent = iid;
   $("#live-meta").innerHTML = "";
   $("#live-tabs").innerHTML = "";
-  $("#live-reasoning").textContent = "";
-  $("#live-content").textContent = "";
-  $("#live-r-len").textContent = "";
-  $("#live-c-len").textContent = "";
+  $("#live-turns").innerHTML = "";
   if (!entries.length) {
     $("#live-meta").innerHTML =
       `该实例暂无实时数据:尚未执行到该题,或服务重启导致进程内缓冲丢失。` +
@@ -454,6 +476,7 @@ function openLivePanel(iid) {
     return;
   }
   $("#live-body").style.display = "";
+  startLiveFastPoll();
   $("#live-tabs").innerHTML = entries.map((e, i) =>
     `<button class="btn sm${i === pickLiveEntry(entries) ? " primary" : ""}"
        data-role="${esc(e.provider_role)}" data-run="${e.run_index}">
@@ -470,43 +493,171 @@ function pickLiveEntry(entries) {
 }
 
 function switchLiveTab(iid, role, runIndex) {
-  liveSel = { iid, role, runIndex, rOffset: 0, cOffset: 0, finalized: false };
-  $("#live-reasoning").textContent = "";
-  $("#live-content").textContent = "";
-  $("#live-r-len").textContent = "";
-  $("#live-c-len").textContent = "";
+  liveSel = {
+    iid, role, runIndex,
+    turn: 0, rOffset: 0, cOffset: 0, tOffset: 0, finalized: false,
+    blocks: new Map(), // turn -> { root, rPre, cPre, rLen, cLen }
+  };
+  $("#live-turns").innerHTML = "";
   $("#live-tabs").querySelectorAll("button").forEach((btn) =>
     btn.classList.toggle("primary",
       btn.dataset.role === role && +btn.dataset.run === runIndex));
   updateLivePanel(true);
 }
 
+/* 渲染一轮对话块：外层 details 控制整轮，内层两个 details 分别收纳思考过程与模型输出，
+   流式到对应内容时自动展开，进入下一轮时自动收起(用户手动展开不受影响) */
+function makeTurnBlock(turnIdx, label) {
+  const box = document.createElement("details");
+  box.className = "live-turn";
+  box.open = true;
+  box.style.cssText = "border:1px solid #e2e8f0;border-radius:8px;margin:6px 0;background:#fff";
+  const sum = document.createElement("summary");
+  sum.style.cssText = "cursor:pointer;padding:6px 10px;font-size:12.5px;font-weight:600;background:#f1f5f9;border-radius:8px;user-select:none";
+  box.appendChild(sum);
+
+  const mkSection = (title, color, preStyle) => {
+    const wrap = document.createElement("details");
+    wrap.style.cssText = "margin:8px 10px 0";
+    const s = document.createElement("summary");
+    s.style.cssText = `cursor:pointer;font-size:11.5px;color:${color};user-select:none`;
+    s.textContent = title;
+    const pre = document.createElement("pre");
+    pre.className = "patch";
+    pre.style.cssText = preStyle;
+    wrap.append(s, pre);
+    return { wrap, sum: s, pre };
+  };
+  const r = mkSection("🧠 思考过程 (reasoning)", "#7c3aed",
+    "max-height:200px;min-height:40px;overflow:auto;white-space:pre-wrap;margin:4px 0");
+  const c = mkSection("📄 模型输出 (content)", "#2563eb",
+    "max-height:260px;min-height:40px;overflow:auto;white-space:pre-wrap;margin:4px 0");
+  const t = mkSection("🔧 工具调用 (tools)", "#059669",
+    "max-height:260px;min-height:40px;overflow:auto;white-space:pre-wrap;margin:4px 0;font-size:12px");
+  box.append(r.wrap, c.wrap, t.wrap);
+  $("#live-turns").appendChild(box);
+  const blk = {
+    root: box, sum,
+    rWrap: r.wrap, rSum: r.sum, rPre: r.pre,
+    cWrap: c.wrap, cSum: c.sum, cPre: c.pre,
+    tWrap: t.wrap, tSum: t.sum, tPre: t.pre,
+    rLen: 0, cLen: 0, tLen: 0, label,
+    rAutoOpened: false, rAutoClosed: false, cAutoOpened: false,
+    rUserOpen: null, tUserOpen: null, // 用户手动展开/收起过则为 true/false,未手动操作过为 null
+  };
+  box.addEventListener("toggle", () => { if (box.open) refreshTurnSummary(blk, turnIdx); });
+  // 区分「自动逻辑」与「用户点击」造成的展开/收起：
+  // 自动逻辑在改 open 前置 AutoPending, toggle 事件异步触发后清除;
+  // 否则该次切换来自用户点击,记录其当前意图,新一轮自动收起时予以尊重。
+  const trackSection = (wrap, key) => {
+    wrap.addEventListener("toggle", () => {
+      if (blk[key + "AutoPending"]) { blk[key + "AutoPending"] = false; return; }
+      blk[key + "UserOpen"] = wrap.open;
+    });
+  };
+  trackSection(r.wrap, "r");
+  trackSection(t.wrap, "t");
+  return blk;
+}
+
+/* 思考过程输出完毕后自动收起(仅在自动展开过且尚未收起时执行一次) */
+function autoCollapseReasoning(blk) {
+  if (blk.rAutoOpened && !blk.rAutoClosed) {
+    blk.rAutoPending = true;
+    blk.rWrap.open = false;
+    blk.rAutoClosed = true;
+  }
+}
+
+/* 工具节标题：收起时仍显示本轮调用过的工具名 */
+function refreshToolSummary(blk) {
+  const names = [...blk.tPre.textContent.matchAll(/⚙ ([A-Za-z_0-9]+)\(/g)].map((m) => m[1]);
+  blk.tSum.textContent = "🔧 工具调用 (tools)" + (names.length ? ` · ${names.join(", ")}` : "");
+}
+
+function refreshTurnSummary(blk, turnIdx) {
+  blk.sum.innerHTML =
+    `第 ${turnIdx + 1} 轮${blk.label ? ` · ${esc(blk.label)}` : ""}` +
+    ` <span style="color:#7c3aed;font-weight:400">🧠 ${blk.rLen.toLocaleString()} 字符</span>` +
+    ` <span style="color:#2563eb;font-weight:400">📄 ${blk.cLen.toLocaleString()} 字符</span>` +
+    ` <span style="color:#059669;font-weight:400">🔧 ${blk.tLen.toLocaleString()} 字符</span>`;
+}
+
 async function updateLivePanel(immediate = false) {
   if (!liveSel || !selectedRunId) return;
-  const { iid, role, runIndex, rOffset, cOffset } = liveSel;
+  if (liveSel.fetching) return; // 上一次请求未返回，跳过本轮，避免乱序
+  const sel = liveSel; // 固定本次请求所属的面板会话；期间切换标签/关闭面板则丢弃过期响应
+  const { iid, role, runIndex, turn, rOffset, cOffset, tOffset } = liveSel;
   const meta = liveEntries.find((e) =>
     e.instance_id === iid && e.provider_role === role && e.run_index === runIndex);
   if (!meta) {
     $("#live-meta").innerHTML = "实时缓冲已失效(实例尚未开始或缓冲被清理)。";
     return;
   }
-  const finished = meta.status === "done"
-    && meta.reasoning_chars <= rOffset && meta.content_chars <= cOffset;
+  const finished = meta.status === "done" && (() => {
+    let r = 0, c = 0, t = 0;
+    for (const b of (liveSel.blocks?.values() || [])) { r += b.rLen; c += b.cLen; t += b.tLen; }
+    return r >= (meta.reasoning_chars || 0) && c >= (meta.content_chars || 0)
+      && t >= (meta.tool_chars || 0);
+  })();
   if (finished && liveSel.finalized && !immediate) return;
+  liveSel.fetching = true;
   let d;
   try {
     d = await api(`/api/runs/${selectedRunId}/live-detail`
       + `?instance_id=${encodeURIComponent(iid)}&role=${encodeURIComponent(role)}`
-      + `&run_index=${runIndex}&r_offset=${rOffset}&c_offset=${cOffset}`);
-  } catch (err) { $("#live-meta").innerHTML = esc(err.message); return; }
+      + `&run_index=${runIndex}&turn=${turn}&r_offset=${rOffset}&c_offset=${cOffset}&t_offset=${tOffset}`);
+  } catch (err) {
+    if (liveSel === sel) {
+      liveSel.fetching = false;
+      $("#live-meta").innerHTML = esc(err.message);
+    }
+    return;
+  }
+  if (liveSel !== sel) return; // 面板已关闭或切换到其他标签/实例，丢弃过期响应
+  liveSel.fetching = false;
+
+  // 依次应用各轮增量：已有轮追加文本，新轮建块
+  for (const part of d.parts || []) {
+    let blk = liveSel.blocks.get(part.turn);
+    if (!blk) {
+      // 新一轮开始：上一轮仅收起思考与工具两节(用户手动展开的除外)，模型输出跨轮保持展开
+      for (const b of liveSel.blocks.values()) {
+        if (!b.rUserOpen) { b.rAutoPending = true; b.rWrap.open = false; }
+        if (!b.tUserOpen) { b.tAutoPending = true; b.tWrap.open = false; }
+      }
+      blk = makeTurnBlock(part.turn, part.label || "");
+      liveSel.blocks.set(part.turn, blk);
+      blk.root.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+    if (part.reasoning) {
+      if (!blk.rAutoOpened) { blk.rAutoPending = true; blk.rWrap.open = true; blk.rAutoOpened = true; }
+      stickScroll(blk.rPre, () => { blk.rPre.textContent += part.reasoning; });
+    }
+    if (part.content) {
+      if (!blk.cAutoOpened) { blk.cWrap.open = true; blk.cAutoOpened = true; }
+      // 思考过程输出完毕(正文开始流式)：自动收起思考，正文保持常开
+      autoCollapseReasoning(blk);
+      stickScroll(blk.cPre, () => { blk.cPre.textContent += part.content; });
+    }
+    if (part.tool) {
+      // 新调用开始(⏳)自动展开；结果输出完(✓/✗)自动收起，摘要行保留工具名
+      if (part.tool.includes("⏳")) { blk.tAutoPending = true; blk.tWrap.open = true; }
+      autoCollapseReasoning(blk);
+      stickScroll(blk.tPre, () => { blk.tPre.textContent += part.tool; });
+      refreshToolSummary(blk);
+      if (/^\s*[✓✗]/m.test(part.tool)) { blk.tAutoPending = true; blk.tWrap.open = false; }
+    }
+    blk.rLen = blk.rPre.textContent.length;
+    blk.cLen = blk.cPre.textContent.length;
+    blk.tLen = blk.tPre.textContent.length;
+    refreshTurnSummary(blk, part.turn);
+  }
+  liveSel.turn = Math.max(d.turn ?? 0, (d.turns_total || 1) - 1);
   liveSel.rOffset = d.r_offset;
   liveSel.cOffset = d.c_offset;
+  liveSel.tOffset = d.t_offset;
   liveSel.finalized = finished;
-  const rPre = $("#live-reasoning"), cPre = $("#live-content");
-  if (d.reasoning_part) stickScroll(rPre, () => { rPre.textContent += d.reasoning_part; });
-  if (d.content_part) stickScroll(cPre, () => { cPre.textContent += d.content_part; });
-  $("#live-r-len").textContent = `${d.reasoning_chars} 字符`;
-  $("#live-c-len").textContent = `${d.content_chars} 字符`;
   const liveInput = d.prompt_tokens || 0;
   const liveOutput = d.completion_tokens || 0;
   const liveCache = d.cached_tokens || 0;
@@ -516,6 +667,7 @@ async function updateLivePanel(immediate = false) {
 
   $("#live-meta").innerHTML =
     `<b>${esc(d.model)}</b> · Provider · ${esc(d.phase)} · run ${runIndex}` +
+    ` · 已进行 <b>${d.turns_total || 0}</b> 轮` +
     (d.status === "streaming"
       ? ' · <span style="color:#2563eb">● 流式输出中…</span>'
       : ` · 已结束 finish=${esc(d.finish_reason || "—")}`)

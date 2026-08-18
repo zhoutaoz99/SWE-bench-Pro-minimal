@@ -340,8 +340,10 @@ app.get('/api/runs/:runId/live-detail', (req, res) => {
       query.instance_id,
       query.role,
       query.run_index,
+      query.turn,
       query.r_offset,
       query.c_offset,
+      query.t_offset,
     );
     if (!detail) {
       res.status(404).json({ detail: 'live entry not found (尚未开始或缓冲已失效)' });
@@ -425,8 +427,13 @@ app.delete('/api/runs/:runId', (req, res) => {
 
 // ---------------- Frontend ----------------
 
-app.use('/static', express.static(WEB_DIR));
+// 前端无构建步骤，禁用强缓存确保改动即时生效
+app.use('/static', (_req, res, next) => {
+  res.set('Cache-Control', 'no-cache');
+  next();
+}, express.static(WEB_DIR));
 app.get('/', (_req, res) => {
+  res.set('Cache-Control', 'no-cache');
   res.sendFile(path.join(WEB_DIR, 'index.html'));
 });
 
